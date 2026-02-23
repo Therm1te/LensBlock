@@ -42,6 +42,17 @@ class ShieldWindow(QWidget):
         
         layout.addWidget(self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
         
+        # Lockout Timer text
+        self.lockout_label = QLabel("System locked for 0 seconds.")
+        self.lockout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        timer_font = QFont("Segoe UI", 24, QFont.Weight.Bold)
+        self.lockout_label.setFont(timer_font)
+        # Deep orange for timer countdown
+        self.lockout_label.setStyleSheet("color: #FF9933; background-color: transparent;")
+        
+        layout.addWidget(self.lockout_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        
         # Initialize opacity
         self.opacity = 0.0
         self.setWindowOpacity(self.opacity)
@@ -76,7 +87,7 @@ class PrivacyShield(QObject):
         self.fade_timer = QTimer(self)
         self.fade_timer.timeout.connect(self._do_fade)
 
-    def trigger_shield(self, is_active: bool):
+    def trigger_shield(self, is_active: bool, remaining_seconds: int = 0):
         """Called by the main thread when a threat is detected or resolved."""
         if is_active:
             # Stop any fading out that might be occurring
@@ -87,6 +98,7 @@ class PrivacyShield(QObject):
             
             # Shield ON: Show on all screens robustly
             for shield in self.shields:
+                shield.lockout_label.setText(f"System locked for {remaining_seconds} seconds.")
                 # Re-assert geometry just in case screen resolution changed
                 shield.setGeometry(shield.screen_obj.geometry())
                 shield.setWindowOpacity(1.0)

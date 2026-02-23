@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QApplication, QStyle, QMessageBox
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QImage, QPixmap, QIcon
 import cv2
 
 class SettingsDashboard(QWidget):
@@ -63,9 +63,9 @@ class SettingsDashboard(QWidget):
         self.status_label = QLabel("System Status: ARMED")
         self.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
         
-        self.shield_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation)
+        self.shield_icon = QIcon('media/LensBlockBGRem.png')
         self.icon_label = QLabel()
-        self.icon_label.setPixmap(self.shield_icon.pixmap(32, 32))
+        self.icon_label.setPixmap(self.shield_icon.pixmap(80, 80))
 
         header_layout.addWidget(self.icon_label)
         header_layout.addWidget(self.status_label)

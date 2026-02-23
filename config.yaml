@@ -1,6 +1,7 @@
 detection:
-  confidence_threshold: 0.5
-  persistence_frames: 2
+  confidence_threshold: 0.55
+  lockout_duration_seconds: 10
+  persistence_frames: 1
 logging:
   enable_forensic_logging: true
 system:

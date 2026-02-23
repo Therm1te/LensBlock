@@ -3,7 +3,8 @@ import argparse
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QMessageBox, QStyle
 )
-from PyQt6.QtGui import QIcon, QAction
+from PyQt6.QtGui import QIcon, QAction, QPixmap
+from PyQt6.QtCore import Qt
 
 # Internal Imports
 from config import ConfigHandler
@@ -17,6 +18,10 @@ class LensBlockApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False) # Essential for tray applications
+        
+        # Set Taskbar Icon globally for all windows
+        app_icon = QIcon('media/LensBlockBGRem.png')
+        self.app.setWindowIcon(app_icon)
         
         self.config = ConfigHandler()
         self.logger = ThreatLogger()
@@ -39,9 +44,10 @@ class LensBlockApp:
         """Initializes the Windows System Tray Icon."""
         self.tray_icon = QSystemTrayIcon(self.app)
         
-        # You'll usually replace this with a proper shield.ico file
-        # Using a default message box icon as placeholder
-        self.tray_icon.setIcon(self.app.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxInformation))
+        # Set Tray Icon
+        # Provide an explicit scaled Pixmap to force maximum available tray area rendering
+        pixmap = QPixmap('media/LensBlockBGRem.png').scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.tray_icon.setIcon(QIcon(pixmap))
         self.tray_icon.setToolTip("LensBlock - System Armed")
 
         tray_menu = QMenu()
@@ -78,16 +84,16 @@ class LensBlockApp:
         self.controller.threat_detected.connect(self._on_threat_detected)
         self.controller.frame_ready.connect(self._on_frame_ready)
 
-    def _on_threat_detected(self, is_active, confidence):
+    def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
         if is_active:
             # Trigger full-screen blackout lock
-            self.shield.trigger_shield(True)
+            self.shield.trigger_shield(True, remaining_seconds)
             self.dashboard.status_label.setText("System Status: LOCKDOWN")
             self.dashboard.status_label.setStyleSheet("color: #FF3333; font-weight: bold; font-size: 16px;")
         else:
             # Dissolve lock
-            self.shield.trigger_shield(False)
+            self.shield.trigger_shield(False, 0)
             self.dashboard.status_label.setText("System Status: ARMED")
             self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
 
