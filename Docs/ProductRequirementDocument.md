@@ -29,7 +29,7 @@ instantly obfuscates the screen if a recording device
 
 **3. Technical Specifications & Stack**
 
-- **Core Language:** Python 3.12
+- **Core Language:** Python 3.11
 
 - **AI / Vision Model:** YOLOv8-Nano (COCO pre-trained, focusing on
   Class ID 67: cell phone).
@@ -138,23 +138,23 @@ instantly obfuscates the screen if a recording device
 
 **6. User Flow (The \"Happy Path\")**
 
-1.  User launches LensBlock.exe. The app minimizes to the system tray.
+1. User launches LensBlock.exe. The app minimizes to the system tray.
 
-2.  User opens a sensitive dashboard (e.g., customer financial data).
+2. User opens a sensitive dashboard (e.g., customer financial data).
 
-3.  User receives a text and raises their smartphone into the camera\'s
+3. User receives a text and raises their smartphone into the camera\'s
     field of view.
 
-4.  The Persistence pipeline registers the phone across 3 consecutive
+4. The Persistence pipeline registers the phone across 3 consecutive
     frames.
 
-5.  LensBlock instantly maximizes a black overlay across the screen.
+5. LensBlock instantly maximizes a black overlay across the screen.
 
-6.  User puts the phone down.
+6. User puts the phone down.
 
-7.  The screen overlay disappears, allowing the user to resume work.
+7. The screen overlay disappears, allowing the user to resume work.
 
-8.  The incident is silently logged to the local SQLite database.
+8. The incident is silently logged to the local SQLite database.
 
 **7. Critical Architecture Rule:** The application MUST use a
 multi-threaded architecture using PyQt6 QThread and pyqtSignal.
