@@ -1,0 +1,14 @@
+lensblock/
+├── main.py                 # Entry point, initializes threads and tray icon
+├── config.yaml             # Stores user settings (threshold, persistence)
+├── core/
+│   ├── engine.py           # ONNX Runtime & YOLO inference logic
+│   └── camera.py           # OpenCV video capture stream
+├── security/
+│   ├── controller.py       # Persistence buffer and threat logic
+│   └── logger.py           # SQLite database interactions
+├── ui/
+│   ├── dashboard.py        # PyQt6 settings window
+│   └── shield.py           # PyQt6 transparent/blackout overlay
+└── models/
+    └── yolov8n.onnx        # The exported YOLO model

@@ -1,0 +1,7 @@
+detection:
+  confidence_threshold: 0.6
+  persistence_frames: 3
+logging:
+  enable_forensic_logging: true
+system:
+  start_on_boot: false
