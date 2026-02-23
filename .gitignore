@@ -180,3 +180,4 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /venv311
+security/lensblock_audit.db
