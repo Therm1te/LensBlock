@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QApplication
 from PyQt6.QtCore import Qt, QTimer, QObject
-from PyQt6.QtGui import QColor, QPalette, QFont, QGuiApplication
+from PyQt6.QtGui import QColor, QPalette, QFont, QGuiApplication, QPixmap
 
 class ShieldWindow(QWidget):
     """
@@ -22,36 +22,39 @@ class ShieldWindow(QWidget):
             Qt.WindowType.X11BypassWindowManagerHint
         )
         
-        # Transparent background for the widget
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        
-        # Set dark translucent overlay color
-        self.setStyleSheet("background-color: rgba(20, 20, 20, 240);") # ~95% opacity black
+        # Set solid slate overlay color
+        self.setStyleSheet("background-color: #0f172a;")
         
         layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setLayout(layout)
         
-        # Threat Message text
-        self.warning_label = QLabel("Visual Threat Detected.\nCamera in Field of View.")
-        self.warning_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Icon
+        self.icon_label = QLabel()
+        pixmap = QPixmap('media/LensBlockBGRem.png').scaled(
+            128, 128, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        self.icon_label.setPixmap(pixmap)
+        self.icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.icon_label)
         
-        font = QFont("Segoe UI", 36, QFont.Weight.Bold)
-        self.warning_label.setFont(font)
-        # Deep red color for high visibility on dark background
-        self.warning_label.setStyleSheet("color: #FF3333; background-color: transparent;")
+        # Header
+        self.header_label = QLabel("VISUAL THREAT DETECTED")
+        self.header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.header_label.setStyleSheet("color: #ef4444; font-size: 32px; font-weight: bold; font-family: 'Segoe UI'; background-color: transparent;")
+        layout.addWidget(self.header_label)
         
-        layout.addWidget(self.warning_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        # Subtext
+        self.subtext_label = QLabel("A recording device has entered the secure monitoring zone. Please remove the device to resume work.")
+        self.subtext_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.subtext_label.setStyleSheet("color: #94a3b8; font-size: 16px; font-family: 'Segoe UI'; background-color: transparent;")
+        layout.addWidget(self.subtext_label)
         
         # Lockout Timer text
         self.lockout_label = QLabel("System locked for 0 seconds.")
         self.lockout_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
-        timer_font = QFont("Segoe UI", 24, QFont.Weight.Bold)
-        self.lockout_label.setFont(timer_font)
-        # Deep orange for timer countdown
-        self.lockout_label.setStyleSheet("color: #FF9933; background-color: transparent;")
-        
-        layout.addWidget(self.lockout_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.lockout_label.setStyleSheet("color: #ffffff; font-size: 24px; font-weight: bold; font-family: 'Consolas'; margin-top: 20px; background-color: transparent;")
+        layout.addWidget(self.lockout_label)
         
         # Initialize opacity
         self.opacity = 0.0
