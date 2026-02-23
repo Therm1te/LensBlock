@@ -1,0 +1,14 @@
+# ==========================================
+# LENSBLOCK v1.0 - REQUIREMENTS
+# ==========================================
+
+# Core Vision & Inference Engine
+# DO NOT UPDATE: Pinned strictly to maintain AMD DirectML compatibility 
+# and avoid the NumPy 2.0 C-API crashes.
+numpy==1.26.4
+opencv-python==4.10.0.84
+onnxruntime-directml==1.18.0
+
+# User Interface & Overlays
+# PyQt6 handles the Dashboard and the multi-monitor Privacy Shield.
+PyQt6==6.6.1
