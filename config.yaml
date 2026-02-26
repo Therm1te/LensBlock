@@ -1,5 +1,5 @@
 detection:
-  confidence_threshold: 0.55
+  confidence_threshold: 0.75
   lockout_duration_seconds: 10
   persistence_frames: 1
 logging:
