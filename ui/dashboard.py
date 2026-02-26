@@ -1,17 +1,22 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QCheckBox, QPushButton, QFrame, 
-    QApplication, QStyle, QMessageBox
+    QApplication, QStyle, QMessageBox, QComboBox
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QIcon
+from PyQt6.QtMultimedia import QMediaDevices
 import cv2
+import os
 
 class SettingsDashboard(QWidget):
     """
     Main user-facing settings window.
     Allows configuring sensitivity, persistence, and viewing a camera preview.
     """
+    restart_camera_requested = pyqtSignal()
+    restart_engine_requested = pyqtSignal()
+
     def __init__(self, config_handler, logger_instance):
         super().__init__()
         self.config = config_handler
@@ -76,7 +81,46 @@ class SettingsDashboard(QWidget):
         # Separator line
         self._add_separator(layout)
 
-        # 2. Controls Area
+        # 2. Hardware and Model Selectors
+        hardware_layout = QHBoxLayout()
+        
+        # Camera Dropdown
+        self.camera_combo = QComboBox()
+        self.camera_combo.currentIndexChanged.connect(self._camera_changed)
+        
+        self.refresh_cam_btn = QPushButton("Refresh")
+        self.refresh_cam_btn.setStyleSheet("background-color: #333333; padding: 4px; border-radius: 4px;")
+        self.refresh_cam_btn.clicked.connect(self._populate_cameras)
+        
+        self._populate_cameras() # Initial population
+        
+        hardware_layout.addWidget(QLabel("Camera Source:"))
+        hardware_layout.addWidget(self.camera_combo)
+        hardware_layout.addWidget(self.refresh_cam_btn)
+        
+        # Model Dropdown
+        self.model_combo = QComboBox()
+        model_dir = "models"
+        if os.path.exists(model_dir):
+            onnx_models = [f for f in os.listdir(model_dir) if f.endswith(".onnx")]
+            for model_file in onnx_models:
+                # Add human readable text and proper relative path as data
+                self.model_combo.addItem(model_file, f"{model_dir}/{model_file}")
+                
+        curr_model = self.config.get('detection', 'model_path', 'models/yolov8n.onnx')
+        idx_found = self.model_combo.findData(curr_model)
+        if idx_found >= 0:
+            self.model_combo.setCurrentIndex(idx_found)
+        self.model_combo.currentIndexChanged.connect(self._model_changed)
+        
+        hardware_layout.addWidget(QLabel("   ONNX Model:"))
+        hardware_layout.addWidget(self.model_combo)
+        
+        layout.addLayout(hardware_layout)
+        
+        self._add_separator(layout)
+
+        # 3. Controls Area
         # Sensitivity Slider
         sens_layout = QHBoxLayout()
         self.sens_label = QLabel(f"Detection Sensitivity:")
@@ -157,6 +201,41 @@ class SettingsDashboard(QWidget):
         preview_layout.addStretch()
         
         layout.addLayout(preview_layout)
+
+    def _populate_cameras(self):
+        """Discovers and populates the camera dropdown."""
+        # Block signals so we don't trigger a restart while populating
+        self.camera_combo.blockSignals(True)
+        self.camera_combo.clear()
+        
+        cameras = QMediaDevices.videoInputs()
+        
+        if cameras:
+            for i, cam in enumerate(cameras):
+                desc = cam.description()
+                name = desc if desc else f"Camera {i}"
+                self.camera_combo.addItem(name, i)
+        else:
+            # Fallback if QtMultimedia didn't find any
+            for i in range(5):
+                self.camera_combo.addItem(f"Camera {i}", i)
+                
+        curr_cam = self.config.get('system', 'camera_index', 0)
+        idx_found = self.camera_combo.findData(curr_cam)
+        if idx_found >= 0:
+            self.camera_combo.setCurrentIndex(idx_found)
+            
+        self.camera_combo.blockSignals(False)
+
+    def _camera_changed(self, index):
+        cam_idx = self.camera_combo.itemData(index)
+        self.config.set('system', 'camera_index', cam_idx)
+        self.restart_camera_requested.emit()
+        
+    def _model_changed(self, index):
+        model_path = self.model_combo.itemData(index)
+        self.config.set('detection', 'model_path', model_path)
+        self.restart_engine_requested.emit()
 
     def _add_separator(self, layout):
         line = QFrame()

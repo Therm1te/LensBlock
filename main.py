@@ -57,9 +57,9 @@ class LensBlockApp:
         open_action.triggered.connect(self.dashboard.show)
         tray_menu.addAction(open_action)
 
-        pause_action = QAction("Pause Monitoring", self.app)
-        pause_action.triggered.connect(self._pause_monitoring)
-        tray_menu.addAction(pause_action)
+        self.pause_action = QAction("Pause Monitoring", self.app)
+        self.pause_action.triggered.connect(self._pause_monitoring)
+        tray_menu.addAction(self.pause_action)
         
         tray_menu.addSeparator()
 
@@ -83,6 +83,18 @@ class LensBlockApp:
         """Bind QThread signals from controller to UI Thread components."""
         self.controller.threat_detected.connect(self._on_threat_detected)
         self.controller.frame_ready.connect(self._on_frame_ready)
+        
+        # Disconnect previous controller bindings if they exist
+        try:
+            self.dashboard.restart_camera_requested.disconnect()
+            self.dashboard.restart_engine_requested.disconnect()
+            self.shield.override_triggered.disconnect()
+        except TypeError:
+            pass # No connections yet
+            
+        self.dashboard.restart_camera_requested.connect(self.controller.request_camera_restart)
+        self.dashboard.restart_engine_requested.connect(self.controller.request_engine_restart)
+        self.shield.override_triggered.connect(self.controller.clear_threat_state)
 
     def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
@@ -106,6 +118,7 @@ class LensBlockApp:
         """Temporarily pauses the camera processing."""
         if self.controller.is_running:
             self.controller.stop()
+            self.pause_action.setText("Resume Monitoring")
             self.tray_icon.setToolTip("LensBlock - Paused")
             self.dashboard.status_label.setText("System Status: PAUSED")
             self.dashboard.status_label.setStyleSheet("color: #aaaaaa; font-weight: bold; font-size: 16px;")
@@ -115,6 +128,7 @@ class LensBlockApp:
             self.controller = SecurityController(self.config, self.logger)
             self._connect_signals()
             self.controller.start()
+            self.pause_action.setText("Pause Monitoring")
             self.tray_icon.setToolTip("LensBlock - System Armed")
             self.dashboard.status_label.setText("System Status: ARMED")
             self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")

@@ -24,6 +24,8 @@ class SecurityController(QThread):
         self.engine = YoloV8Engine()
         
         self.is_running = False
+        self.pending_camera_restart = False
+        self.pending_model_restart = False
         
         # State variables
         self.consecutive_threat_frames = 0
@@ -31,6 +33,7 @@ class SecurityController(QThread):
         self.incident_start_time = None
         self.max_threat_confidence = 0.0
         self.lockout_end_time = 0.0
+        self.override_until = 0.0
 
     def get_settings(self):
         """Fetches dynamic settings that the user might have updated."""
@@ -49,6 +52,20 @@ class SecurityController(QThread):
         self.is_running = True
         
         while self.is_running:
+            if self.pending_camera_restart:
+                camera_idx = self.config.get('system', 'camera_index', 0)
+                print(f"Restarting camera with index: {camera_idx}")
+                self.camera.stop()
+                self.camera = CameraStream(camera_index=camera_idx)
+                self.camera.start()
+                self.pending_camera_restart = False
+            
+            if self.pending_model_restart:
+                model_path = self.config.get('detection', 'model_path', 'models/yolov8n.onnx')
+                print(f"Restarting engine with model: {model_path}")
+                self.engine = YoloV8Engine(model_path=model_path)
+                self.pending_model_restart = False
+
             frame = self.camera.read()
             if frame is None:
                 time.sleep(0.01)
@@ -65,9 +82,13 @@ class SecurityController(QThread):
 
     def _evaluate_state(self, detected, confidence):
         """Applies heuristic validation (confidence thresholds & persistence)."""
-        threshold, required_persistence, log_enabled, lockout_duration = self.get_settings()
-        
         current_time = time.time()
+        
+        # Immediate bypass if under Windows Hello Grace Period
+        if current_time < self.override_until:
+            return
+            
+        threshold, required_persistence, log_enabled, lockout_duration = self.get_settings()
         
         # 1. Is it a potential threat?
         is_high_confidence = detected and confidence >= threshold
@@ -120,6 +141,30 @@ class SecurityController(QThread):
             # Prevent negative numbers from short timing glitches
             remaining = max(0, remaining)
             self.threat_detected.emit(True, remaining)
+
+    def request_camera_restart(self):
+        self.pending_camera_restart = True
+        
+    def request_engine_restart(self):
+        self.pending_model_restart = True
+
+    def clear_threat_state(self, grace_period_seconds=300):
+        """Called by UI when manual override succeeds. Ignores threats for a grace period."""
+        self.override_until = time.time() + grace_period_seconds
+        
+        if self.is_threat_active:
+            duration = time.time() - self.incident_start_time if self.incident_start_time else 0.0
+            log_enabled = self.config.get('logging', 'enable_forensic_logging', True)
+            if log_enabled:
+                self.logger.log_threat("Cell phone visual intrusion - OVERRIDDEN", self.max_threat_confidence, duration)
+            print("THREAT OVERRIDDEN by User via Windows Hello.")
+            
+        self.consecutive_threat_frames = 0
+        self.is_threat_active = False
+        self.incident_start_time = None
+        self.max_threat_confidence = 0.0
+        self.lockout_end_time = 0.0
+        self.threat_detected.emit(False, 0)
 
     def stop(self):
         """Safely shuts down the loop and releases hardware."""

@@ -1,13 +1,38 @@
 import sys
-from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QApplication
-from PyQt6.QtCore import Qt, QTimer, QObject
+import ctypes
+import ctypes.wintypes
+import subprocess
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QApplication, QPushButton
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QPalette, QFont, QGuiApplication, QPixmap
+
+class WindowsHelloThread(QThread):
+    """Background thread calling external auth script to bypass PyQt deadlocks."""
+    auth_successful = pyqtSignal()
+    auth_failed = pyqtSignal(str)
+
+    def run(self):
+        try:
+            # Spawn standalone topmost python script carrying CredUI payload
+            res = subprocess.run([sys.executable, "auth_helper.py"], capture_output=True)
+            if res.returncode == 0:
+                self.auth_successful.emit()
+            elif res.returncode == 1223:
+                self.auth_failed.emit("Authentication cancelled.")
+            else:
+                self.auth_failed.emit(f"Failed with code: {res.returncode}")
+        except Exception as e:
+            self.auth_failed.emit(str(e))
 
 class ShieldWindow(QWidget):
     """
     A full-screen, always-on-top overlay that visually blocks the screen when a threat is detected.
     It uses a heavy translucent dark effect.
     """
+    override_successful = pyqtSignal()
+    auth_started = pyqtSignal()
+    auth_finished = pyqtSignal()
+    
     def __init__(self, screen_obj):
         super().__init__()
         self.screen_obj = screen_obj
@@ -56,12 +81,54 @@ class ShieldWindow(QWidget):
         self.lockout_label.setStyleSheet("color: #ffffff; font-size: 24px; font-weight: bold; font-family: 'Consolas'; margin-top: 20px; background-color: transparent;")
         layout.addWidget(self.lockout_label)
         
+        # Override Button
+        self.override_btn = QPushButton("Manual Override (Windows Hello)")
+        self.override_btn.setFixedWidth(350)
+        self.override_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #3b82f6; 
+                color: white; 
+                font-size: 16px; 
+                font-weight: bold;
+                font-family: 'Segoe UI'; 
+                padding: 12px 20px; 
+                border-radius: 6px;
+                margin-top: 30px;
+            }
+            QPushButton:hover {
+                background-color: #2563eb;
+            }
+        """)
+        self.override_btn.clicked.connect(self._trigger_override)
+        layout.addWidget(self.override_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+        
         # Initialize opacity
         self.opacity = 0.0
         self.setWindowOpacity(self.opacity)
         
         # Snap to specific monitor
         self.setGeometry(self.screen_obj.geometry())
+
+    def _trigger_override(self):
+        self.override_btn.setEnabled(False)
+        self.override_btn.setText("Authenticating...")
+        
+        self.auth_started.emit()
+        
+        self.auth_thread = WindowsHelloThread()
+        self.auth_thread.auth_successful.connect(self._on_auth_success)
+        self.auth_thread.auth_failed.connect(self._on_auth_failed)
+        self.auth_thread.start()
+        
+    def _on_auth_success(self):
+        self.override_btn.setText("Override Authorized")
+        self.override_successful.emit()
+            
+    def _on_auth_failed(self, reason):
+        print(f"Windows Hello Auth failed: {reason}")
+        self.override_btn.setEnabled(True)
+        self.override_btn.setText("Manual Override (Windows Hello)")
+        self.auth_finished.emit()
 
     def mousePressEvent(self, event):
         """Intercept clicks so user cannot interact with masked content."""
@@ -75,13 +142,19 @@ class PrivacyShield(QObject):
     """
     Manager class that handles rendering ShieldWindows across all active monitors simultaneously.
     """
+    override_triggered = pyqtSignal()
+    
     def __init__(self):
         super().__init__()
         self.shields = []
+        self.is_authenticating = False
         
         # Initialize one overlay per screen
         for screen in QGuiApplication.screens():
             shield = ShieldWindow(screen)
+            shield.override_successful.connect(self.override_triggered.emit)
+            shield.auth_started.connect(self._on_auth_started)
+            shield.auth_finished.connect(self._on_auth_finished)
             self.shields.append(shield)
             
         self.opacity = 0.0
@@ -90,8 +163,20 @@ class PrivacyShield(QObject):
         self.fade_timer = QTimer(self)
         self.fade_timer.timeout.connect(self._do_fade)
 
+    def _on_auth_started(self):
+        self.is_authenticating = True
+
+    def _on_auth_finished(self):
+        self.is_authenticating = False
+
     def trigger_shield(self, is_active: bool, remaining_seconds: int = 0):
         """Called by the main thread when a threat is detected or resolved."""
+        if self.is_authenticating:
+            # ONLY update the countdown string, do not alter window focus/z-order
+            for shield in self.shields:
+                shield.lockout_label.setText(f"System locked for {remaining_seconds} seconds.")
+            return
+
         if is_active:
             # Stop any fading out that might be occurring
             if self.fade_timer.isActive():

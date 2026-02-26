@@ -1,8 +1,10 @@
 detection:
   confidence_threshold: 0.75
   lockout_duration_seconds: 10
+  model_path: models/yolov8n.onnx
   persistence_frames: 1
 logging:
   enable_forensic_logging: true
 system:
+  camera_index: 4
   start_on_boot: false
