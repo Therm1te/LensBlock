@@ -11,6 +11,7 @@ from config import ConfigHandler
 from security.logger import ThreatLogger
 from core.engine import YoloV8Engine # Ensure ONNX Runtime initializes early
 from security.controller import SecurityController
+from security.hotkey_manager import HotkeyManager
 from ui.dashboard import SettingsDashboard
 from ui.shield import PrivacyShield
 
@@ -29,6 +30,7 @@ class LensBlockApp:
         # 1. Initialize UI Components
         self.dashboard = SettingsDashboard(self.config, self.logger)
         self.shield = PrivacyShield()
+        self.manually_unlocked = False
         
         # 2. Setup System Tray
         self._init_tray()
@@ -39,6 +41,11 @@ class LensBlockApp:
 
         # Start background thread
         self.controller.start()
+        
+        # 4. Initialize Global Hotkey Listener
+        self.hotkey_manager = HotkeyManager()
+        self.hotkey_manager.unlock_requested.connect(self._on_unlock_requested)
+        self.hotkey_manager.start()
 
     def _init_tray(self):
         """Initializes the Windows System Tray Icon."""
@@ -88,16 +95,17 @@ class LensBlockApp:
         try:
             self.dashboard.restart_camera_requested.disconnect()
             self.dashboard.restart_engine_requested.disconnect()
-            self.shield.override_triggered.disconnect()
         except TypeError:
             pass # No connections yet
             
         self.dashboard.restart_camera_requested.connect(self.controller.request_camera_restart)
         self.dashboard.restart_engine_requested.connect(self.controller.request_engine_restart)
-        self.shield.override_triggered.connect(self.controller.clear_threat_state)
 
     def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
+        if self.manually_unlocked:
+            return  # Suppress signals while manually overridden
+            
         if is_active:
             # Trigger full-screen blackout lock
             self.shield.trigger_shield(True, remaining_seconds)
@@ -116,26 +124,43 @@ class LensBlockApp:
 
     def _pause_monitoring(self):
         """Temporarily pauses the camera processing."""
-        if self.controller.is_running:
-            self.controller.stop()
+        if self.controller.is_running and self.controller.monitoring_active:
+            self.controller.pause_monitoring()
             self.pause_action.setText("Resume Monitoring")
             self.tray_icon.setToolTip("LensBlock - Paused")
             self.dashboard.status_label.setText("System Status: PAUSED")
             self.dashboard.status_label.setStyleSheet("color: #aaaaaa; font-weight: bold; font-size: 16px;")
             QMessageBox.information(None, "Paused", "Monitoring paused until restarted.")
         else:
-            # Restart
-            self.controller = SecurityController(self.config, self.logger)
-            self._connect_signals()
-            self.controller.start()
+            # Resume
+            self.controller.resume_monitoring()
+            self.manually_unlocked = False
             self.pause_action.setText("Pause Monitoring")
             self.tray_icon.setToolTip("LensBlock - System Armed")
             self.dashboard.status_label.setText("System Status: ARMED")
             self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
             QMessageBox.information(None, "Resumed", "Monitoring resumed.")
 
+    def _on_unlock_requested(self):
+        """Handles the global Ctrl+Alt+L hotkey to unlock the shield."""
+        # 1. Immediately hide the shield
+        self.shield.hide_shield()
+        
+        # 2. Block further signals from re-showing the shield
+        self.manually_unlocked = True
+        
+        # 3. Pause detection
+        print("HOTKEY UNLOCK: Pausing monitoring via Ctrl+Alt+L.")
+        if self.controller.is_running and self.controller.monitoring_active:
+            self.controller.pause_monitoring()
+            self.pause_action.setText("Resume Monitoring")
+            self.tray_icon.setToolTip("LensBlock - Paused (Unlocked)")
+            self.dashboard.status_label.setText("System Status: UNLOCKED")
+            self.dashboard.status_label.setStyleSheet("color: #facc15; font-weight: bold; font-size: 16px;")
+
     def _exit_app(self):
         """Clean shutdown mechanism."""
+        self.hotkey_manager.stop()
         self.controller.stop()
         self.tray_icon.hide()
         self.app.quit()

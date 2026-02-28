@@ -1,9 +1,17 @@
 import time
+import cv2
 from PyQt6.QtCore import QObject, pyqtSignal as Signal, QThread
 from config import ConfigHandler
 from security.logger import ThreatLogger
 from core.engine import YoloV8Engine
 from core.camera import CameraStream
+
+try:
+    import pyvirtualcam
+    VIRTUAL_CAM_AVAILABLE = True
+except ImportError:
+    VIRTUAL_CAM_AVAILABLE = False
+    print("Warning: pyvirtualcam not installed. Virtual camera disabled.")
 
 class SecurityController(QThread):
     """
@@ -24,6 +32,7 @@ class SecurityController(QThread):
         self.engine = YoloV8Engine()
         
         self.is_running = False
+        self.monitoring_active = True
         self.pending_camera_restart = False
         self.pending_model_restart = False
         
@@ -33,7 +42,6 @@ class SecurityController(QThread):
         self.incident_start_time = None
         self.max_threat_confidence = 0.0
         self.lockout_end_time = 0.0
-        self.override_until = 0.0
 
     def get_settings(self):
         """Fetches dynamic settings that the user might have updated."""
@@ -51,6 +59,16 @@ class SecurityController(QThread):
 
         self.is_running = True
         
+        # Initialize virtual camera for broadcasting to Zoom/Teams
+        vcam = None
+        if VIRTUAL_CAM_AVAILABLE:
+            try:
+                vcam = pyvirtualcam.Camera(width=640, height=480, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
+                print(f"Virtual Camera started: {vcam.device}")
+            except Exception as e:
+                print(f"Warning: Could not start virtual camera ({e}). Broadcasting disabled.")
+                vcam = None
+        
         while self.is_running:
             if self.pending_camera_restart:
                 camera_idx = self.config.get('system', 'camera_index', 0)
@@ -66,29 +84,56 @@ class SecurityController(QThread):
                 self.engine = YoloV8Engine(model_path=model_path)
                 self.pending_model_restart = False
 
-            frame = self.camera.read()
-            if frame is None:
-                time.sleep(0.01)
-                continue
-                
-            # Emit raw frame for dashboard preview
-            self.frame_ready.emit(frame)
+            # We need the RAW frame for the virtual camera when paused,
+            # since self.camera.read() returns None when self.camera.is_paused
+            with self.camera.lock:
+                raw_frame = self.camera.current_frame.copy() if self.camera.current_frame is not None else None
 
-            detected, confidence = self.engine.detect(frame)
-            self._evaluate_state(detected, confidence)
+            if self.monitoring_active:
+                frame = self.camera.read()
+                if frame is not None:
+                    # Emit raw frame for dashboard preview
+                    self.frame_ready.emit(frame)
+        
+                    detected, confidence = self.engine.detect(frame)
+                    self._evaluate_state(detected, confidence)
+                    
+                    # If detected, frame now has bounding boxes drawn by the engine
+                    raw_frame = frame
+            else:
+                # Still emit raw frame for dashboard when paused, but mark it
+                if raw_frame is not None:
+                    # Add a small "PAUSED" text to the preview so the user knows
+                    preview_frame = raw_frame.copy()
+                    cv2.putText(preview_frame, "AI PAUSED", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                    self.frame_ready.emit(preview_frame)
             
-            # Prevent 100% CPU lock in tight loops
-            time.sleep(0.01)
+            # Broadcast frame to virtual camera (BGR → RGB)
+            if vcam is not None and raw_frame is not None:
+                try:
+                    rgb_frame = cv2.cvtColor(raw_frame, cv2.COLOR_BGR2RGB)
+                    # Resize to match virtual camera dimensions if needed
+                    h, w = rgb_frame.shape[:2]
+                    if w != vcam.width or h != vcam.height:
+                        rgb_frame = cv2.resize(rgb_frame, (vcam.width, vcam.height))
+                    vcam.send(rgb_frame)
+                    vcam.sleep_until_next_frame()
+                except Exception as e:
+                    pass  # Silently skip frame on transient errors
+            else:
+                # Prevent 100% CPU lock in tight loops
+                time.sleep(0.01)
+        
+        # Clean up virtual camera
+        if vcam is not None:
+            vcam.close()
+            print("Virtual Camera closed.")
 
     def _evaluate_state(self, detected, confidence):
         """Applies heuristic validation (confidence thresholds & persistence)."""
-        current_time = time.time()
-        
-        # Immediate bypass if under Windows Hello Grace Period
-        if current_time < self.override_until:
-            return
-            
         threshold, required_persistence, log_enabled, lockout_duration = self.get_settings()
+        
+        current_time = time.time()
         
         # 1. Is it a potential threat?
         is_high_confidence = detected and confidence >= threshold
@@ -142,29 +187,30 @@ class SecurityController(QThread):
             remaining = max(0, remaining)
             self.threat_detected.emit(True, remaining)
 
+    def pause_monitoring(self):
+        """Temporarily disables YOLO inference and threat evaluation, but keeps camera alive."""
+        self.monitoring_active = False
+        self.camera.pause()
+        
+        # Instantly resolve any active threats cleanly
+        if self.is_threat_active:
+            self.is_threat_active = False
+            self.consecutive_threat_frames = 0
+            self.incident_start_time = None
+            self.max_threat_confidence = 0.0
+            self.lockout_end_time = 0.0
+            self.threat_detected.emit(False, 0)
+            
+    def resume_monitoring(self):
+        """Re-enables YOLO inference."""
+        self.monitoring_active = True
+        self.camera.resume()
+
     def request_camera_restart(self):
         self.pending_camera_restart = True
         
     def request_engine_restart(self):
         self.pending_model_restart = True
-
-    def clear_threat_state(self, grace_period_seconds=300):
-        """Called by UI when manual override succeeds. Ignores threats for a grace period."""
-        self.override_until = time.time() + grace_period_seconds
-        
-        if self.is_threat_active:
-            duration = time.time() - self.incident_start_time if self.incident_start_time else 0.0
-            log_enabled = self.config.get('logging', 'enable_forensic_logging', True)
-            if log_enabled:
-                self.logger.log_threat("Cell phone visual intrusion - OVERRIDDEN", self.max_threat_confidence, duration)
-            print("THREAT OVERRIDDEN by User via Windows Hello.")
-            
-        self.consecutive_threat_frames = 0
-        self.is_threat_active = False
-        self.incident_start_time = None
-        self.max_threat_confidence = 0.0
-        self.lockout_end_time = 0.0
-        self.threat_detected.emit(False, 0)
 
     def stop(self):
         """Safely shuts down the loop and releases hardware."""

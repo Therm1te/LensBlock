@@ -10,6 +10,7 @@ class CameraStream:
         self.fps = fps
         self.cap = None
         self.is_running = False
+        self.is_paused = False
         self.current_frame = None
         self.lock = threading.Lock()
         self.thread = None
@@ -43,8 +44,9 @@ class CameraStream:
             if self.cap and self.cap.isOpened():
                 ret, frame = self.cap.read()
                 if ret:
-                    with self.lock:
-                        self.current_frame = frame
+                    if not self.is_paused:
+                        with self.lock:
+                            self.current_frame = frame
                 else:
                     print("Warning: Failed to read frame from camera.")
             
@@ -56,10 +58,19 @@ class CameraStream:
 
     def read(self):
         """Returns the most recent frame."""
+        if self.is_paused:
+            return None
+            
         with self.lock:
             if self.current_frame is not None:
                 return self.current_frame.copy()
             return None
+
+    def pause(self):
+        self.is_paused = True
+
+    def resume(self):
+        self.is_paused = False
 
     def stop(self):
         """Stops the video capture thread and releases the camera."""

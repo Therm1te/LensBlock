@@ -204,21 +204,31 @@ class SettingsDashboard(QWidget):
 
     def _populate_cameras(self):
         """Discovers and populates the camera dropdown."""
-        # Block signals so we don't trigger a restart while populating
         self.camera_combo.blockSignals(True)
         self.camera_combo.clear()
         
+        # 1. Try QtMultimedia first (good for real names of physical devices)
         cameras = QMediaDevices.videoInputs()
+        qt_found = len(cameras)
         
         if cameras:
             for i, cam in enumerate(cameras):
                 desc = cam.description()
                 name = desc if desc else f"Camera {i}"
                 self.camera_combo.addItem(name, i)
-        else:
-            # Fallback if QtMultimedia didn't find any
+                
+        # 2. Fallback / Augment with OpenCV DirectShow (catches OBS Virtual Camera better on Windows)
+        # We'll check up to index 4. If Qt found it, we might double-list, but it ensures virtual cams appear.
+        for i in range(qt_found, 5): 
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                self.camera_combo.addItem(f"DShow Camera {i}", i)
+                cap.release()
+                
+        # 3. Absolute Fallback if nothing at all
+        if self.camera_combo.count() == 0:
             for i in range(5):
-                self.camera_combo.addItem(f"Camera {i}", i)
+                self.camera_combo.addItem(f"Unknown Camera {i}", i)
                 
         curr_cam = self.config.get('system', 'camera_index', 0)
         idx_found = self.camera_combo.findData(curr_cam)
