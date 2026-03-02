@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt
 from config import ConfigHandler
 from security.logger import ThreatLogger
 from core.engine import YoloV8Engine # Ensure ONNX Runtime initializes early
-from security.controller import SecurityController
+from security.controller import SecurityController, ProtectionMode
 from security.hotkey_manager import HotkeyManager
 from ui.dashboard import SettingsDashboard
 from ui.shield import PrivacyShield
@@ -100,11 +100,17 @@ class LensBlockApp:
             
         self.dashboard.restart_camera_requested.connect(self.controller.request_camera_restart)
         self.dashboard.restart_engine_requested.connect(self.controller.request_engine_restart)
+        self.dashboard.mode_changed.connect(self._on_mode_changed)
+        self.controller.censored_frame_ready.connect(self._on_censored_frame)
 
     def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
         if self.manually_unlocked:
             return  # Suppress signals while manually overridden
+        
+        # Only trigger the shield in SHIELD mode
+        if self.controller.protection_mode != ProtectionMode.SHIELD:
+            return
             
         if is_active:
             # Trigger full-screen blackout lock
@@ -121,6 +127,25 @@ class LensBlockApp:
         """If dashboard is open, stream frame to UI."""
         if self.dashboard.isVisible():
             self.dashboard.update_frame(cv_frame)
+
+    def _on_censored_frame(self, sanitized_frame):
+        """When in censorship mode, show the sanitized feed in the dashboard preview."""
+        if self.dashboard.isVisible():
+            self.dashboard.update_frame(sanitized_frame)
+
+    def _on_mode_changed(self, mode_str):
+        """Handle protection mode toggle from the dashboard."""
+        mode = ProtectionMode.SHIELD if mode_str == "shield" else ProtectionMode.CENSORSHIP
+        self.controller.set_protection_mode(mode)
+        
+        # If switching to censorship, hide any active shield
+        if mode == ProtectionMode.CENSORSHIP:
+            self.shield.hide_shield()
+            self.dashboard.status_label.setText("System Status: CENSORSHIP")
+            self.dashboard.status_label.setStyleSheet("color: #ff9800; font-weight: bold; font-size: 16px;")
+        else:
+            self.dashboard.status_label.setText("System Status: ARMED")
+            self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
 
     def _pause_monitoring(self):
         """Temporarily pauses the camera processing."""

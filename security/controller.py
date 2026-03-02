@@ -1,5 +1,7 @@
 import time
 import cv2
+import numpy as np
+from enum import Enum
 from PyQt6.QtCore import QObject, pyqtSignal as Signal, QThread
 from config import ConfigHandler
 from security.logger import ThreatLogger
@@ -13,6 +15,10 @@ except ImportError:
     VIRTUAL_CAM_AVAILABLE = False
     print("Warning: pyvirtualcam not installed. Virtual camera disabled.")
 
+class ProtectionMode(Enum):
+    SHIELD = "shield"          # v1: Full-screen blackout
+    CENSORSHIP = "censorship"  # v2: Real-time object blurring
+
 class SecurityController(QThread):
     """
     Background worker thread that manages the camera stream, 
@@ -21,7 +27,8 @@ class SecurityController(QThread):
     """
     # Emits (is_threat_active, remaining_lockout_seconds)
     threat_detected = Signal(bool, int)
-    frame_ready = Signal(object) # For updating the dashboard preview
+    frame_ready = Signal(object)           # For updating the dashboard preview
+    censored_frame_ready = Signal(object)  # Censored frame for vcam preview
 
     def __init__(self, config: ConfigHandler, logger: ThreatLogger):
         super().__init__()
@@ -33,6 +40,7 @@ class SecurityController(QThread):
         
         self.is_running = False
         self.monitoring_active = True
+        self.protection_mode = ProtectionMode.SHIELD
         self.pending_camera_restart = False
         self.pending_model_restart = False
         
@@ -94,12 +102,52 @@ class SecurityController(QThread):
                 if frame is not None:
                     # Emit raw frame for dashboard preview
                     self.frame_ready.emit(frame)
-        
-                    detected, confidence = self.engine.detect(frame)
-                    self._evaluate_state(detected, confidence)
-                    
-                    # If detected, frame now has bounding boxes drawn by the engine
-                    raw_frame = frame
+
+                    if self.protection_mode == ProtectionMode.CENSORSHIP:
+                        # --- CENSORSHIP MODE: blur threat ROIs on the original resolution frame ---
+                        threshold = self.get_settings()[0]
+                        detected, confidence, boxes = self.engine.detect_with_boxes(frame, conf_threshold=threshold)
+                        
+                        # Apply blur to the raw full-resolution frame (not the engine-scaled copy)
+                        sanitized = raw_frame.copy() if raw_frame is not None else frame.copy()
+                        for (x1, y1, x2, y2) in boxes:
+                            roi = sanitized[y1:y2, x1:x2]
+                            if roi.size > 0:
+                                sanitized[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (51, 51), 0)
+                        
+                        self.censored_frame_ready.emit(sanitized)
+                        raw_frame = sanitized  # Feed sanitized frame to virtual camera
+                        
+                        # Log if detected  (but DON'T trigger the shield)
+                        if detected:
+                            _, _, log_enabled, _ = self.get_settings()
+                            if not self.is_threat_active:
+                                self.is_threat_active = True
+                                self.incident_start_time = time.time()
+                                self.max_threat_confidence = confidence
+                            elif confidence > self.max_threat_confidence:
+                                self.max_threat_confidence = confidence
+                        else:
+                            if self.is_threat_active:
+                                duration = time.time() - self.incident_start_time if self.incident_start_time else 0.0
+                                _, _, log_enabled, _ = self.get_settings()
+                                if log_enabled:
+                                    self.logger.log_threat("Cell phone visual intrusion (censored)", self.max_threat_confidence, duration)
+                                self.is_threat_active = False
+                                self.incident_start_time = None
+                                self.max_threat_confidence = 0.0
+                    else:
+                        # --- SHIELD MODE: v1 full-screen blackout ---
+                        detected, confidence = self.engine.detect(frame)
+                        self._evaluate_state(detected, confidence)
+                        raw_frame = frame
+                        
+                        # During shield lockdown, send a black "PRIVACY BLOCKED" frame to vcam
+                        if self.is_threat_active:
+                            blocked = np.zeros((480, 640, 3), dtype=np.uint8)
+                            cv2.putText(blocked, "PRIVACY BLOCKED", (130, 250),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (50, 50, 200), 3, cv2.LINE_AA)
+                            raw_frame = blocked
             else:
                 # Still emit raw frame for dashboard when paused, but mark it
                 if raw_frame is not None:
@@ -205,6 +253,19 @@ class SecurityController(QThread):
         """Re-enables YOLO inference."""
         self.monitoring_active = True
         self.camera.resume()
+
+    def set_protection_mode(self, mode: ProtectionMode):
+        """Switch between Shield and Censorship modes."""
+        self.protection_mode = mode
+        # Reset threat state cleanly when switching modes
+        if self.is_threat_active:
+            self.is_threat_active = False
+            self.consecutive_threat_frames = 0
+            self.incident_start_time = None
+            self.max_threat_confidence = 0.0
+            self.lockout_end_time = 0.0
+            self.threat_detected.emit(False, 0)
+        print(f"Protection mode changed to: {mode.value}")
 
     def request_camera_restart(self):
         self.pending_camera_restart = True

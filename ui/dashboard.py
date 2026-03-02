@@ -16,6 +16,7 @@ class SettingsDashboard(QWidget):
     """
     restart_camera_requested = pyqtSignal()
     restart_engine_requested = pyqtSignal()
+    mode_changed = pyqtSignal(str)  # Emits "shield" or "censorship"
 
     def __init__(self, config_handler, logger_instance):
         super().__init__()
@@ -157,9 +158,22 @@ class SettingsDashboard(QWidget):
         pers_layout.addWidget(self.pers_value_label)
         layout.addLayout(pers_layout)
 
-        # Separator Line
-        self._add_separator(layout)
+        # --- Protection Mode Toggle ---
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Protection Mode:"))
         
+        self.mode_btn = QPushButton("🛡️  SHIELD MODE")
+        self.mode_btn.setStyleSheet(
+            "background-color: #1a3a5c; padding: 10px; border-radius: 6px; "
+            "font-weight: bold; font-size: 13px;"
+        )
+        self._current_mode = "shield"
+        self.mode_btn.clicked.connect(self._toggle_mode)
+        mode_layout.addWidget(self.mode_btn)
+        layout.addLayout(mode_layout)
+
+        self._add_separator(layout)
+
         # 3. Switches and Logs
         self.log_checkbox = QCheckBox("Enable Forensic SQLite Logging")
         self.log_checkbox.setChecked(self.config.get('logging', 'enable_forensic_logging', True))
@@ -246,6 +260,23 @@ class SettingsDashboard(QWidget):
         model_path = self.model_combo.itemData(index)
         self.config.set('detection', 'model_path', model_path)
         self.restart_engine_requested.emit()
+
+    def _toggle_mode(self):
+        if self._current_mode == "shield":
+            self._current_mode = "censorship"
+            self.mode_btn.setText("🔍  CENSORSHIP MODE")
+            self.mode_btn.setStyleSheet(
+                "background-color: #4a2c1a; padding: 10px; border-radius: 6px; "
+                "font-weight: bold; font-size: 13px;"
+            )
+        else:
+            self._current_mode = "shield"
+            self.mode_btn.setText("🛡️  SHIELD MODE")
+            self.mode_btn.setStyleSheet(
+                "background-color: #1a3a5c; padding: 10px; border-radius: 6px; "
+                "font-weight: bold; font-size: 13px;"
+            )
+        self.mode_changed.emit(self._current_mode)
 
     def _add_separator(self, layout):
         line = QFrame()

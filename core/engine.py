@@ -97,3 +97,55 @@ class YoloV8Engine:
         except Exception as e:
             print(f"Inference error: {e}")
             return False, 0.0
+
+    def detect_with_boxes(self, frame, conf_threshold=None):
+        """
+        Runs detection and returns bounding boxes for all threat-class objects.
+        Returns (detected, best_confidence, threat_boxes)
+        where threat_boxes is a list of (x1, y1, x2, y2) in original frame coords.
+        """
+        if self.session is None or frame is None:
+            return False, 0.0, []
+
+        if conf_threshold is None:
+            conf_threshold = 0.25
+
+        input_tensor = self._preprocess(frame)
+
+        try:
+            outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
+        except Exception as e:
+            print(f"Inference error: {e}")
+            return False, 0.0, []
+
+        predictions = np.transpose(outputs[0], (0, 2, 1))[0]
+        orig_h, orig_w = frame.shape[:2]
+        scale_x = orig_w / self.input_width
+        scale_y = orig_h / self.input_height
+
+        best_conf = 0.0
+        detected = False
+        threat_boxes = []
+
+        for pred in predictions:
+            x_c, y_c, bw, bh = pred[0], pred[1], pred[2], pred[3]
+            class_scores = pred[4:]
+
+            if len(class_scores) <= self.target_class_id:
+                continue
+
+            score = float(class_scores[self.target_class_id])
+            if score < conf_threshold:
+                continue
+
+            detected = True
+            if score > best_conf:
+                best_conf = score
+
+            x1 = max(0, int((x_c - bw / 2) * scale_x))
+            y1 = max(0, int((y_c - bh / 2) * scale_y))
+            x2 = min(orig_w, int((x_c + bw / 2) * scale_x))
+            y2 = min(orig_h, int((y_c + bh / 2) * scale_y))
+            threat_boxes.append((x1, y1, x2, y2))
+
+        return detected, best_conf, threat_boxes
