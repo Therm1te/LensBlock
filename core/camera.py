@@ -35,6 +35,11 @@ class CameraStream:
         self.is_running = True
         self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
+        
+        # Store the actual resolution the camera is using
+        self.actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"Camera opened at {self.actual_width}x{self.actual_height}")
         return True
 
     def _update(self):

@@ -74,12 +74,14 @@ class SecurityController(QThread):
 
         self.is_running = True
         
-        # Initialize virtual camera for broadcasting to Zoom/Teams
+        # Initialize virtual camera matching real camera resolution
         vcam = None
+        cam_w = getattr(self.camera, 'actual_width', 640)
+        cam_h = getattr(self.camera, 'actual_height', 480)
         if VIRTUAL_CAM_AVAILABLE:
             try:
-                vcam = pyvirtualcam.Camera(width=640, height=480, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
-                print(f"Virtual Camera started: {vcam.device}")
+                vcam = pyvirtualcam.Camera(width=cam_w, height=cam_h, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
+                print(f"Virtual Camera started: {vcam.device} ({cam_w}x{cam_h})")
             except Exception as e:
                 print(f"Warning: Could not start virtual camera ({e}). Broadcasting disabled.")
                 vcam = None
@@ -212,8 +214,10 @@ class SecurityController(QThread):
                         
                         # During shield lockdown, send a black "PRIVACY BLOCKED" frame to vcam
                         if self.is_threat_active:
-                            blocked = np.zeros((480, 640, 3), dtype=np.uint8)
-                            cv2.putText(blocked, "PRIVACY BLOCKED", (130, 250),
+                            blocked = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
+                            tx = cam_w // 2 - 150
+                            ty = cam_h // 2
+                            cv2.putText(blocked, "PRIVACY BLOCKED", (tx, ty),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (50, 50, 200), 3, cv2.LINE_AA)
                             raw_frame = blocked
             else:
