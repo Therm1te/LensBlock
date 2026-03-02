@@ -1,5 +1,6 @@
 import time
 import cv2
+from enum import Enum
 from PyQt6.QtCore import QObject, pyqtSignal as Signal, QThread
 from config import ConfigHandler
 from security.logger import ThreatLogger
@@ -13,6 +14,12 @@ except ImportError:
     VIRTUAL_CAM_AVAILABLE = False
     print("Warning: pyvirtualcam not installed. Virtual camera disabled.")
 
+
+class ProtectionMode(Enum):
+    SHIELD = "shield"        # v1: Full-screen blackout overlay
+    CENSORSHIP = "censorship"  # v2: Real-time object blurring on stream
+
+
 class SecurityController(QThread):
     """
     Background worker thread that manages the camera stream, 
@@ -21,8 +28,9 @@ class SecurityController(QThread):
     """
     # Emits (is_threat_active, remaining_lockout_seconds)
     threat_detected = Signal(bool, int)
-    frame_ready = Signal(object)     # For updating the dashboard preview
-    debug_frame_ready = Signal(object)  # For the debug view annotated frame
+    frame_ready = Signal(object)          # For updating the dashboard preview
+    censored_frame_ready = Signal(object)  # Emits annotated censored frame for dashboard
+    mode_changed = Signal(str)             # Emits new mode name for UI feedback
 
     def __init__(self, config: ConfigHandler, logger: ThreatLogger):
         super().__init__()
@@ -34,14 +42,9 @@ class SecurityController(QThread):
         
         self.is_running = False
         self.monitoring_active = True
-        self.debug_mode = False
+        self.protection_mode = ProtectionMode.SHIELD
         self.pending_camera_restart = False
         self.pending_model_restart = False
-        
-        # FPS tracking
-        self._frame_count = 0
-        self._fps_start = time.time()
-        self._current_fps = 0.0
         
         # State variables
         self.consecutive_threat_frames = 0
@@ -49,6 +52,9 @@ class SecurityController(QThread):
         self.incident_start_time = None
         self.max_threat_confidence = 0.0
         self.lockout_end_time = 0.0
+
+        # Block-first: keep the last safe (censored) frame for vcam fallback
+        self._last_safe_frame = None
 
     def get_settings(self):
         """Fetches dynamic settings that the user might have updated."""
@@ -66,12 +72,14 @@ class SecurityController(QThread):
 
         self.is_running = True
         
-        # Initialize virtual camera for broadcasting to Zoom/Teams
+        # Initialize virtual camera at the camera's native resolution
         vcam = None
         if VIRTUAL_CAM_AVAILABLE:
             try:
-                vcam = pyvirtualcam.Camera(width=640, height=480, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
-                print(f"Virtual Camera started: {vcam.device}")
+                cam_w = int(self.camera.cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if self.camera.cap else 640
+                cam_h = int(self.camera.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if self.camera.cap else 480
+                vcam = pyvirtualcam.Camera(width=cam_w, height=cam_h, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
+                print(f"Virtual Camera started: {vcam.device} ({cam_w}x{cam_h})")
             except Exception as e:
                 print(f"Warning: Could not start virtual camera ({e}). Broadcasting disabled.")
                 vcam = None
@@ -96,48 +104,64 @@ class SecurityController(QThread):
             with self.camera.lock:
                 raw_frame = self.camera.current_frame.copy() if self.camera.current_frame is not None else None
 
-            if self.monitoring_active or self.debug_mode:
+            if self.monitoring_active:
                 frame = self.camera.read()
                 if frame is not None:
                     # Emit raw frame for dashboard preview
                     self.frame_ready.emit(frame)
 
-                    # FPS calculation
-                    self._frame_count += 1
-                    elapsed = time.time() - self._fps_start
-                    if elapsed >= 1.0:
-                        self._current_fps = self._frame_count / elapsed
-                        self._frame_count = 0
-                        self._fps_start = time.time()
-
-                    if self.debug_mode:
-                        # Use the full debug pipeline with bounding boxes
-                        detected, confidence, annotated, det_count = self.engine.detect_debug(frame)
-                        
-                        # Overlay FPS, Status, Detection Count
-                        status_text = "Shield Active" if self.is_threat_active else "Monitoring"
-                        overlay_lines = [
-                            f"FPS: {self._current_fps:.1f}",
-                            f"Status: {status_text}",
-                            f"Detections: {det_count}",
-                        ]
-                        y_offset = annotated.shape[0] - 20
-                        for line in reversed(overlay_lines):
-                            cv2.putText(annotated, line, (8, y_offset),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 136), 1,
-                                        cv2.LINE_AA)
-                            y_offset -= 20
-                        
-                        self.debug_frame_ready.emit(annotated)
-                    else:
+                    if self.protection_mode == ProtectionMode.SHIELD:
+                        # v1: Standard detection → trigger full-screen shield
                         detected, confidence = self.engine.detect(frame)
-                    
-                    # Only evaluate threat state when NOT in debug mode
-                    if not self.debug_mode:
                         self._evaluate_state(detected, confidence)
-                    
-                    # If detected, frame now has bounding boxes drawn by the engine
-                    raw_frame = frame
+                        raw_frame = frame
+                        
+                        # In SHIELD mode during lockdown, send a "PRIVACY BLOCKED" frame to vcam
+                        if self.is_threat_active and vcam is not None:
+                            blocked_frame = frame.copy()
+                            blocked_frame[:] = (15, 23, 42)  # Dark slate color matching shield
+                            cv2.putText(blocked_frame, "PRIVACY BLOCKED", 
+                                       (blocked_frame.shape[1]//2 - 180, blocked_frame.shape[0]//2),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 1.2, (239, 68, 68), 2, cv2.LINE_AA)
+                            raw_frame = blocked_frame
+
+                    elif self.protection_mode == ProtectionMode.CENSORSHIP:
+                        # v2: Detect + blur threat regions with temporal memory
+                        t_start = time.perf_counter()
+                        detected, confidence, clean_frame, annotated_preview, det_count = self.engine.detect_and_censor(frame)
+                        inference_ms = (time.perf_counter() - t_start) * 1000
+                        
+                        # Block-first logic: if inference took > 50ms, use the
+                        # last known-safe frame to prevent raw frame leakage
+                        if inference_ms > 50 and self._last_safe_frame is not None:
+                            raw_frame = self._last_safe_frame
+                        else:
+                            raw_frame = clean_frame
+                            self._last_safe_frame = clean_frame.copy()
+                        
+                        # Log threats the same way, but do NOT trigger the shield
+                        threshold, _, log_enabled, _ = self.get_settings()
+                        if detected and confidence >= threshold:
+                            if not self.is_threat_active:
+                                self.is_threat_active = True
+                                self.incident_start_time = time.time()
+                                self.max_threat_confidence = confidence
+                        elif not detected and self.is_threat_active:
+                            duration = time.time() - self.incident_start_time if self.incident_start_time else 0.0
+                            if log_enabled:
+                                self.logger.log_threat("Cell phone visual intrusion (censored)", self.max_threat_confidence, duration)
+                            self.is_threat_active = False
+                            self.incident_start_time = None
+                            self.max_threat_confidence = 0.0
+                        
+                        # Add mode indicator overlay on the PREVIEW only (not vcam)
+                        active_count = len(self.engine.active_threats)
+                        status = f"CENSORSHIP | Active Redactions: {active_count}"
+                        cv2.putText(annotated_preview, status, (10, 25),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 200), 1, cv2.LINE_AA)
+                        
+                        # Annotated preview goes to dashboard
+                        self.censored_frame_ready.emit(annotated_preview)
             else:
                 # Still emit raw frame for dashboard when paused, but mark it
                 if raw_frame is not None:
@@ -244,24 +268,22 @@ class SecurityController(QThread):
         self.monitoring_active = True
         self.camera.resume()
 
-    def set_debug_mode(self, enabled: bool):
-        """Toggles debug mode on/off. Debug mode pauses threat evaluation."""
-        self.debug_mode = enabled
-        if enabled:
-            # Ensure camera stream is running for debug
-            self.camera.resume()
-            self.monitoring_active = False
-            # Clear any active threats
-            if self.is_threat_active:
-                self.is_threat_active = False
-                self.consecutive_threat_frames = 0
-                self.incident_start_time = None
-                self.max_threat_confidence = 0.0
-                self.lockout_end_time = 0.0
-                self.threat_detected.emit(False, 0)
-        else:
-            # Restore normal monitoring
-            self.monitoring_active = True
+    def set_protection_mode(self, mode: ProtectionMode):
+        """Switch between SHIELD and CENSORSHIP modes."""
+        self.protection_mode = mode
+        # Clear threat memory when switching modes
+        self.engine.clear_threat_memory()
+        self._last_safe_frame = None
+        # If switching away from SHIELD and threat is active, clear it
+        if mode == ProtectionMode.CENSORSHIP and self.is_threat_active:
+            self.is_threat_active = False
+            self.consecutive_threat_frames = 0
+            self.incident_start_time = None
+            self.max_threat_confidence = 0.0
+            self.lockout_end_time = 0.0
+            self.threat_detected.emit(False, 0)
+        self.mode_changed.emit(mode.value)
+        print(f"Protection mode changed to: {mode.value.upper()}")
 
     def request_camera_restart(self):
         self.pending_camera_restart = True

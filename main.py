@@ -10,11 +10,10 @@ from PyQt6.QtCore import Qt
 from config import ConfigHandler
 from security.logger import ThreatLogger
 from core.engine import YoloV8Engine # Ensure ONNX Runtime initializes early
-from security.controller import SecurityController
+from security.controller import SecurityController, ProtectionMode
 from security.hotkey_manager import HotkeyManager
 from ui.dashboard import SettingsDashboard
 from ui.shield import PrivacyShield
-from ui.debug_view import DebugView
 
 class LensBlockApp:
     def __init__(self):
@@ -31,7 +30,6 @@ class LensBlockApp:
         # 1. Initialize UI Components
         self.dashboard = SettingsDashboard(self.config, self.logger)
         self.shield = PrivacyShield()
-        self.debug_view = DebugView()
         self.manually_unlocked = False
         
         # 2. Setup System Tray
@@ -47,6 +45,7 @@ class LensBlockApp:
         # 4. Initialize Global Hotkey Listener
         self.hotkey_manager = HotkeyManager()
         self.hotkey_manager.unlock_requested.connect(self._on_unlock_requested)
+        self.hotkey_manager.mode_toggle_requested.connect(self._on_mode_toggle)
         self.hotkey_manager.start()
 
     def _init_tray(self):
@@ -92,6 +91,8 @@ class LensBlockApp:
         """Bind QThread signals from controller to UI Thread components."""
         self.controller.threat_detected.connect(self._on_threat_detected)
         self.controller.frame_ready.connect(self._on_frame_ready)
+        self.controller.censored_frame_ready.connect(self._on_censored_frame)
+        self.controller.mode_changed.connect(self._on_mode_updated)
         
         # Disconnect previous controller bindings if they exist
         try:
@@ -102,14 +103,16 @@ class LensBlockApp:
             
         self.dashboard.restart_camera_requested.connect(self.controller.request_camera_restart)
         self.dashboard.restart_engine_requested.connect(self.controller.request_engine_restart)
-        self.dashboard.debug_mode_toggled.connect(self._on_debug_toggled)
-        
-        self.controller.debug_frame_ready.connect(self._on_debug_frame)
+        self.dashboard.mode_changed.connect(self._on_mode_changed)
 
     def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
         if self.manually_unlocked:
             return  # Suppress signals while manually overridden
+        
+        # Only trigger shield overlay in SHIELD mode
+        if self.controller.protection_mode != ProtectionMode.SHIELD:
+            return
             
         if is_active:
             # Trigger full-screen blackout lock
@@ -127,26 +130,37 @@ class LensBlockApp:
         if self.dashboard.isVisible():
             self.dashboard.update_frame(cv_frame)
 
-    def _on_debug_frame(self, annotated_frame):
-        """Stream annotated debug frames to the DebugView window."""
-        if self.debug_view.isVisible():
-            self.debug_view.update_frame(annotated_frame)
+    def _on_censored_frame(self, censored_frame):
+        """In CENSORSHIP mode, update the dashboard preview with the annotated censored feed."""
+        if self.dashboard.isVisible():
+            self.dashboard.update_frame(censored_frame)
 
-    def _on_debug_toggled(self, enabled):
-        """Toggle debug mode on the controller and show/hide the debug window."""
-        self.controller.set_debug_mode(enabled)
-        if enabled:
+    def _on_mode_changed(self, mode_str):
+        """Handles mode change from dashboard dropdown."""
+        mode = ProtectionMode.SHIELD if mode_str == "shield" else ProtectionMode.CENSORSHIP
+        self.controller.set_protection_mode(mode)
+        # If switching to censorship, make sure shield is hidden
+        if mode == ProtectionMode.CENSORSHIP:
             self.shield.hide_shield()
-            self.manually_unlocked = True
-            self.debug_view.show()
-            self.debug_view.raise_()
-            self.dashboard.status_label.setText("System Status: DEBUG")
-            self.dashboard.status_label.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 16px;")
+
+    def _on_mode_toggle(self):
+        """Handles F2 hotkey to toggle between SHIELD and CENSORSHIP."""
+        if self.controller.protection_mode == ProtectionMode.SHIELD:
+            new_mode = ProtectionMode.CENSORSHIP
         else:
-            self.debug_view.hide()
-            self.manually_unlocked = False
-            self.dashboard.status_label.setText("System Status: ARMED")
-            self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
+            new_mode = ProtectionMode.SHIELD
+        self.controller.set_protection_mode(new_mode)
+        # If switching to censorship, make sure shield is hidden
+        if new_mode == ProtectionMode.CENSORSHIP:
+            self.shield.hide_shield()
+
+    def _on_mode_updated(self, mode_str):
+        """Updates the dashboard when mode changes (from any source)."""
+        self.dashboard.set_mode_indicator(mode_str)
+        if mode_str == "shield":
+            self.tray_icon.setToolTip("LensBlock - Shield Mode")
+        else:
+            self.tray_icon.setToolTip("LensBlock - Censorship Mode")
 
     def _pause_monitoring(self):
         """Temporarily pauses the camera processing."""

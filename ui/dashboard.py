@@ -16,7 +16,7 @@ class SettingsDashboard(QWidget):
     """
     restart_camera_requested = pyqtSignal()
     restart_engine_requested = pyqtSignal()
-    debug_mode_toggled = pyqtSignal(bool)
+    mode_changed = pyqtSignal(str)  # Emits 'shield' or 'censorship'
 
     def __init__(self, config_handler, logger_instance):
         super().__init__()
