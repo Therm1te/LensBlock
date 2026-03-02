@@ -16,7 +16,6 @@ class SettingsDashboard(QWidget):
     """
     restart_camera_requested = pyqtSignal()
     restart_engine_requested = pyqtSignal()
-    mode_changed = pyqtSignal(str)  # Emits 'shield' or 'censorship'
 
     def __init__(self, config_handler, logger_instance):
         super().__init__()
@@ -172,12 +171,6 @@ class SettingsDashboard(QWidget):
         self.boot_checkbox.stateChanged.connect(self._boot_toggled)
         layout.addWidget(self.boot_checkbox)
 
-        self.debug_btn = QPushButton("Enable Debug View")
-        self.debug_btn.setStyleSheet("background-color: #333333; padding: 8px; border-radius: 4px;")
-        self._debug_active = False
-        self.debug_btn.clicked.connect(self._debug_toggled)
-        layout.addWidget(self.debug_btn)
-
         # View Logs Button
         self.logs_btn = QPushButton("View Recent Logs")
         self.logs_btn.setStyleSheet("background-color: #333333; padding: 8px; border-radius: 4px;")
@@ -253,16 +246,6 @@ class SettingsDashboard(QWidget):
         model_path = self.model_combo.itemData(index)
         self.config.set('detection', 'model_path', model_path)
         self.restart_engine_requested.emit()
-
-    def _debug_toggled(self):
-        self._debug_active = not self._debug_active
-        if self._debug_active:
-            self.debug_btn.setText("Disable Debug View")
-            self.debug_btn.setStyleSheet("background-color: #1a4d2e; padding: 8px; border-radius: 4px;")
-        else:
-            self.debug_btn.setText("Enable Debug View")
-            self.debug_btn.setStyleSheet("background-color: #333333; padding: 8px; border-radius: 4px;")
-        self.debug_mode_toggled.emit(self._debug_active)
 
     def _add_separator(self, layout):
         line = QFrame()
