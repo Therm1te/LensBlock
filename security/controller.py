@@ -21,7 +21,8 @@ class SecurityController(QThread):
     """
     # Emits (is_threat_active, remaining_lockout_seconds)
     threat_detected = Signal(bool, int)
-    frame_ready = Signal(object) # For updating the dashboard preview
+    frame_ready = Signal(object)     # For updating the dashboard preview
+    debug_frame_ready = Signal(object)  # For the debug view annotated frame
 
     def __init__(self, config: ConfigHandler, logger: ThreatLogger):
         super().__init__()
@@ -33,8 +34,14 @@ class SecurityController(QThread):
         
         self.is_running = False
         self.monitoring_active = True
+        self.debug_mode = False
         self.pending_camera_restart = False
         self.pending_model_restart = False
+        
+        # FPS tracking
+        self._frame_count = 0
+        self._fps_start = time.time()
+        self._current_fps = 0.0
         
         # State variables
         self.consecutive_threat_frames = 0
@@ -89,14 +96,45 @@ class SecurityController(QThread):
             with self.camera.lock:
                 raw_frame = self.camera.current_frame.copy() if self.camera.current_frame is not None else None
 
-            if self.monitoring_active:
+            if self.monitoring_active or self.debug_mode:
                 frame = self.camera.read()
                 if frame is not None:
                     # Emit raw frame for dashboard preview
                     self.frame_ready.emit(frame)
-        
-                    detected, confidence = self.engine.detect(frame)
-                    self._evaluate_state(detected, confidence)
+
+                    # FPS calculation
+                    self._frame_count += 1
+                    elapsed = time.time() - self._fps_start
+                    if elapsed >= 1.0:
+                        self._current_fps = self._frame_count / elapsed
+                        self._frame_count = 0
+                        self._fps_start = time.time()
+
+                    if self.debug_mode:
+                        # Use the full debug pipeline with bounding boxes
+                        detected, confidence, annotated, det_count = self.engine.detect_debug(frame)
+                        
+                        # Overlay FPS, Status, Detection Count
+                        status_text = "Shield Active" if self.is_threat_active else "Monitoring"
+                        overlay_lines = [
+                            f"FPS: {self._current_fps:.1f}",
+                            f"Status: {status_text}",
+                            f"Detections: {det_count}",
+                        ]
+                        y_offset = annotated.shape[0] - 20
+                        for line in reversed(overlay_lines):
+                            cv2.putText(annotated, line, (8, y_offset),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 136), 1,
+                                        cv2.LINE_AA)
+                            y_offset -= 20
+                        
+                        self.debug_frame_ready.emit(annotated)
+                    else:
+                        detected, confidence = self.engine.detect(frame)
+                    
+                    # Only evaluate threat state when NOT in debug mode
+                    if not self.debug_mode:
+                        self._evaluate_state(detected, confidence)
                     
                     # If detected, frame now has bounding boxes drawn by the engine
                     raw_frame = frame
@@ -205,6 +243,25 @@ class SecurityController(QThread):
         """Re-enables YOLO inference."""
         self.monitoring_active = True
         self.camera.resume()
+
+    def set_debug_mode(self, enabled: bool):
+        """Toggles debug mode on/off. Debug mode pauses threat evaluation."""
+        self.debug_mode = enabled
+        if enabled:
+            # Ensure camera stream is running for debug
+            self.camera.resume()
+            self.monitoring_active = False
+            # Clear any active threats
+            if self.is_threat_active:
+                self.is_threat_active = False
+                self.consecutive_threat_frames = 0
+                self.incident_start_time = None
+                self.max_threat_confidence = 0.0
+                self.lockout_end_time = 0.0
+                self.threat_detected.emit(False, 0)
+        else:
+            # Restore normal monitoring
+            self.monitoring_active = True
 
     def request_camera_restart(self):
         self.pending_camera_restart = True
