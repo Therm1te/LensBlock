@@ -28,7 +28,7 @@ LensBlock is a desktop security daemon that uses your webcam to monitor the imme
 
 ### Common Features
 
-* **High-Performance Inference** — Uses `YOLOv8` backed by `ONNX Runtime` with optional DirectML GPU acceleration.
+* **High-Performance Inference** — Uses `YOLOv26` backed by `ONNX Runtime` with optional DirectML GPU acceleration.
 * **Forensic Auditing** — Every threat incident is logged into an SQLite evidence database (`lensblock_audit.db`) with timestamps, confidence scores, and duration.
 * **Native Resolution** — The virtual camera matches the hardware camera's actual resolution, preventing stretching or aspect ratio distortion.
 
@@ -89,7 +89,7 @@ LensBlock is a desktop security daemon that uses your webcam to monitor the imme
    ```
 
 4. **Prepare the ML model:**
-   Ensure a YOLOv26 ONNX model (e.g., `yolov26.onnx`) is placed inside the `models/` directory.
+   Ensure an ONNX model (e.g., `yolov26.onnx`) is placed inside the `models/` directory.
 
 ---
 
