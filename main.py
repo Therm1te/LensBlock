@@ -10,7 +10,7 @@ from PyQt6.QtCore import Qt
 from config import ConfigHandler
 from security.logger import ThreatLogger
 from core.engine import YoloV8Engine # Ensure ONNX Runtime initializes early
-from security.controller import SecurityController
+from security.controller import SecurityController, ProtectionMode
 from security.hotkey_manager import HotkeyManager
 from ui.dashboard import SettingsDashboard
 from ui.shield import PrivacyShield
@@ -31,7 +31,7 @@ class LensBlockApp:
         # 1. Initialize UI Components
         self.dashboard = SettingsDashboard(self.config, self.logger)
         self.shield = PrivacyShield()
-        self.debug_view = DebugView()
+        self.debug_window = DebugView()
         self.manually_unlocked = False
         
         # 2. Setup System Tray
@@ -102,14 +102,19 @@ class LensBlockApp:
             
         self.dashboard.restart_camera_requested.connect(self.controller.request_camera_restart)
         self.dashboard.restart_engine_requested.connect(self.controller.request_engine_restart)
-        self.dashboard.debug_mode_toggled.connect(self._on_debug_toggled)
-        
-        self.controller.debug_frame_ready.connect(self._on_debug_frame)
+        self.dashboard.mode_changed.connect(self._on_mode_changed)
+        self.dashboard.debug_view_requested.connect(self._on_debug_toggled)
+        self.controller.censored_frame_ready.connect(self._on_censored_frame)
+        self.controller.debug_frame_ready.connect(self.debug_window.update_frame)
 
     def _on_threat_detected(self, is_active, remaining_seconds):
         """Fired in UI scale when controller toggles."""
         if self.manually_unlocked:
             return  # Suppress signals while manually overridden
+        
+        # Only trigger the shield in SHIELD mode
+        if self.controller.protection_mode != ProtectionMode.SHIELD:
+            return
             
         if is_active:
             # Trigger full-screen blackout lock
@@ -127,26 +132,32 @@ class LensBlockApp:
         if self.dashboard.isVisible():
             self.dashboard.update_frame(cv_frame)
 
-    def _on_debug_frame(self, annotated_frame):
-        """Stream annotated debug frames to the DebugView window."""
-        if self.debug_view.isVisible():
-            self.debug_view.update_frame(annotated_frame)
+    def _on_censored_frame(self, sanitized_frame):
+        """When in censorship mode, show the sanitized feed in the dashboard preview."""
+        if self.dashboard.isVisible():
+            self.dashboard.update_frame(sanitized_frame)
 
-    def _on_debug_toggled(self, enabled):
-        """Toggle debug mode on the controller and show/hide the debug window."""
-        self.controller.set_debug_mode(enabled)
-        if enabled:
+    def _on_mode_changed(self, mode_str):
+        """Handle protection mode toggle from the dashboard."""
+        mode = ProtectionMode.SHIELD if mode_str == "shield" else ProtectionMode.CENSORSHIP
+        self.controller.set_protection_mode(mode)
+        
+        # If switching to censorship, hide any active shield
+        if mode == ProtectionMode.CENSORSHIP:
             self.shield.hide_shield()
-            self.manually_unlocked = True
-            self.debug_view.show()
-            self.debug_view.raise_()
-            self.dashboard.status_label.setText("System Status: DEBUG")
-            self.dashboard.status_label.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 16px;")
+            self.dashboard.status_label.setText("System Status: CENSORSHIP")
+            self.dashboard.status_label.setStyleSheet("color: #ff9800; font-weight: bold; font-size: 16px;")
         else:
-            self.debug_view.hide()
-            self.manually_unlocked = False
             self.dashboard.status_label.setText("System Status: ARMED")
             self.dashboard.status_label.setStyleSheet("color: #4caf50; font-weight: bold; font-size: 16px;")
+
+    def _on_debug_toggled(self, enabled):
+        """Handle explicit Debug View enablement/disablement."""
+        self.controller.set_debug_mode(enabled)
+        if enabled:
+            self.debug_window.show()
+        else:
+            self.debug_window.hide()
 
     def _pause_monitoring(self):
         """Temporarily pauses the camera processing."""

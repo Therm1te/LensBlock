@@ -20,13 +20,17 @@ class CameraStream:
         if self.is_running:
             return
 
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_MSMF) # Use Media Foundation on Windows for faster startup
+        # Try DirectShow first (most compatible with external webcams like Logitech C922 on Windows)
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
-            print(f"Warning: Could not open camera {self.camera_index} with Media Foundation. Falling back to default backend.")
-            self.cap = cv2.VideoCapture(self.camera_index)
+            print(f"Warning: Could not open camera {self.camera_index} with DirectShow. Falling back to MSMF.")
+            self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_MSMF)
             if not self.cap.isOpened():
-                print(f"Error: Could not open camera {self.camera_index}")
-                return False
+                print(f"Warning: Could not open camera {self.camera_index} with MSMF. Falling back to default backend.")
+                self.cap = cv2.VideoCapture(self.camera_index)
+                if not self.cap.isOpened():
+                    print(f"Error: Could not open camera {self.camera_index}")
+                    return False
 
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
@@ -77,6 +81,9 @@ class CameraStream:
         self.is_running = False
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=1.0)
+            if self.thread.is_alive():
+                print("Warning: Camera thread is hung. Skipping cap.release() to prevent deadlock.")
+                return
         
         if self.cap and self.cap.isOpened():
             self.cap.release()

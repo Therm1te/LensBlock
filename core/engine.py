@@ -27,13 +27,30 @@ class YoloV8Engine:
         # COCO class ID for cell phone is 67
         self.target_class_id = 67 
 
+    def _letterbox(self, img, new_shape=(640, 640), color=(114, 114, 114)):
+        """Resizes and pads image to preserve aspect ratio"""
+        shape = img.shape[:2]  # current shape [height, width]
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+        dw /= 2  # divide padding into 2 sides
+        dh /= 2
+        
+        if shape[::-1] != new_unpad:  # resize
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+            
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        return img, r, (dw, dh)
+
     def _preprocess(self, image):
         """
         Prepares the OpenCV BGR image for YOLOv8 inference.
-        Resize -> Convert BGR to RGB -> Normalize -> Transpose -> Add batch dimension
+        Letterbox Resize -> Convert BGR to RGB -> Normalize -> Transpose -> Add batch dimension
         """
-        # 1. Resize image to model input shape
-        img = cv2.resize(image, (self.input_width, self.input_height))
+        # 1. Letterbox resize image to model input shape preserving aspect ratio
+        img, ratio, pad = self._letterbox(image, new_shape=(self.input_width, self.input_height))
         
         # 2. Convert from BGR (OpenCV default) to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -47,7 +64,7 @@ class YoloV8Engine:
         # 5. Add batch dimension (BCHW)
         img = np.expand_dims(img, axis=0)
         
-        return img
+        return img, ratio, pad
 
     def _postprocess(self, outputs, orig_img_shape):
         """
@@ -85,7 +102,7 @@ class YoloV8Engine:
             return False, 0.0
 
         # Create input tensor
-        input_tensor = self._preprocess(frame)
+        input_tensor, _, _ = self._preprocess(frame)
         
         # Run inference
         try:
@@ -98,79 +115,53 @@ class YoloV8Engine:
             print(f"Inference error: {e}")
             return False, 0.0
 
-    def detect_debug(self, frame, conf_threshold=0.25):
+    def detect_with_boxes(self, frame, conf_threshold=None):
         """
-        Runs full detection and returns an annotated frame with bounding boxes,
-        class labels, and confidence scores for ALL detected objects.
-        Returns (detected, best_phone_confidence, annotated_frame, detection_count).
+        Runs detection and returns bounding boxes for all threat-class objects.
+        Returns (detected, best_confidence, threat_boxes)
+        where threat_boxes is a list of (x1, y1, x2, y2) in original frame coords.
         """
         if self.session is None or frame is None:
-            return False, 0.0, frame, 0
+            return False, 0.0, []
 
-        input_tensor = self._preprocess(frame)
+        if conf_threshold is None:
+            conf_threshold = 0.25
+
+        input_tensor, ratio, pad = self._preprocess(frame)
 
         try:
             outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
         except Exception as e:
             print(f"Inference error: {e}")
-            return False, 0.0, frame, 0
+            return False, 0.0, []
 
-        predictions = outputs[0]
-        predictions = np.transpose(predictions, (0, 2, 1))[0]
-
+        predictions = np.transpose(outputs[0], (0, 2, 1))[0]
         orig_h, orig_w = frame.shape[:2]
-        annotated = frame.copy()
+        pad_w, pad_h = pad
 
-        best_phone_conf = 0.0
-        phone_detected = False
-        detection_count = 0
-
-        # COCO class names (subset for display)
-        coco_names = {
-            0: "person", 39: "bottle", 41: "cup", 56: "chair",
-            62: "tv", 63: "laptop", 66: "keyboard", 67: "cell phone",
-            73: "book", 74: "clock",
-        }
+        best_conf = 0.0
+        detected = False
+        threat_boxes = []
 
         for pred in predictions:
-            # x_center, y_center, w, h are in model input scale
             x_c, y_c, bw, bh = pred[0], pred[1], pred[2], pred[3]
             class_scores = pred[4:]
 
-            class_id = int(np.argmax(class_scores))
-            score = float(class_scores[class_id])
+            if len(class_scores) <= self.target_class_id:
+                continue
 
+            score = float(class_scores[self.target_class_id])
             if score < conf_threshold:
                 continue
 
-            detection_count += 1
+            detected = True
+            if score > best_conf:
+                best_conf = score
 
-            # Check if it's our target class
-            if class_id == self.target_class_id and score > best_phone_conf:
-                best_phone_conf = score
-                phone_detected = True
+            x1 = max(0, int((x_c - bw / 2 - pad_w) / ratio))
+            y1 = max(0, int((y_c - bh / 2 - pad_h) / ratio))
+            x2 = min(orig_w, int((x_c + bw / 2 - pad_w) / ratio))
+            y2 = min(orig_h, int((y_c + bh / 2 - pad_h) / ratio))
+            threat_boxes.append((x1, y1, x2, y2))
 
-            # Scale bounding box back to original frame coordinates
-            scale_x = orig_w / self.input_width
-            scale_y = orig_h / self.input_height
-
-            x1 = int((x_c - bw / 2) * scale_x)
-            y1 = int((y_c - bh / 2) * scale_y)
-            x2 = int((x_c + bw / 2) * scale_x)
-            y2 = int((y_c + bh / 2) * scale_y)
-
-            # Threat targets get red, everything else gets green
-            is_threat = (class_id == self.target_class_id)
-            color = (0, 0, 255) if is_threat else (0, 200, 0)
-            thickness = 2 if is_threat else 1
-
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thickness)
-
-            label_name = coco_names.get(class_id, f"cls_{class_id}")
-            label = f"{label_name} {score:.0%}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(annotated, label, (x1 + 2, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-
-        return phone_detected, best_phone_conf, annotated, detection_count
+        return detected, best_conf, threat_boxes

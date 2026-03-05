@@ -1,5 +1,7 @@
 import time
 import cv2
+import numpy as np
+from enum import Enum
 from PyQt6.QtCore import QObject, pyqtSignal as Signal, QThread
 from config import ConfigHandler
 from security.logger import ThreatLogger
@@ -13,6 +15,10 @@ except ImportError:
     VIRTUAL_CAM_AVAILABLE = False
     print("Warning: pyvirtualcam not installed. Virtual camera disabled.")
 
+class ProtectionMode(Enum):
+    SHIELD = "shield"          # v1: Full-screen blackout
+    CENSORSHIP = "censorship"  # v2: Real-time object blurring
+
 class SecurityController(QThread):
     """
     Background worker thread that manages the camera stream, 
@@ -21,8 +27,9 @@ class SecurityController(QThread):
     """
     # Emits (is_threat_active, remaining_lockout_seconds)
     threat_detected = Signal(bool, int)
-    frame_ready = Signal(object)     # For updating the dashboard preview
-    debug_frame_ready = Signal(object)  # For the debug view annotated frame
+    frame_ready = Signal(object)           # For updating the dashboard preview
+    censored_frame_ready = Signal(object)  # Censored frame for vcam preview
+    debug_frame_ready = Signal(object)     # For the separate Debug View window
 
     def __init__(self, config: ConfigHandler, logger: ThreatLogger):
         super().__init__()
@@ -34,14 +41,10 @@ class SecurityController(QThread):
         
         self.is_running = False
         self.monitoring_active = True
+        self.protection_mode = ProtectionMode.SHIELD
         self.debug_mode = False
         self.pending_camera_restart = False
         self.pending_model_restart = False
-        
-        # FPS tracking
-        self._frame_count = 0
-        self._fps_start = time.time()
-        self._current_fps = 0.0
         
         # State variables
         self.consecutive_threat_frames = 0
@@ -49,6 +52,13 @@ class SecurityController(QThread):
         self.incident_start_time = None
         self.max_threat_confidence = 0.0
         self.lockout_end_time = 0.0
+        
+        # Censorship mode state
+        self._active_threats = {}   # id -> {"box": (x1,y1,x2,y2), "cooldown": int}
+        self._next_threat_id = 0
+        self._last_censored_frame = None  # Frame-drop fallback
+        self._censor_cooldown_frames = 10
+        self._roi_padding = 0.20    # 20% expansion
 
     def get_settings(self):
         """Fetches dynamic settings that the user might have updated."""
@@ -96,48 +106,148 @@ class SecurityController(QThread):
             with self.camera.lock:
                 raw_frame = self.camera.current_frame.copy() if self.camera.current_frame is not None else None
 
-            if self.monitoring_active or self.debug_mode:
+            if self.debug_mode:
+                # --- PURE DEBUG MODE: Bypass protection logic and just show the AI's "eyes" ---
+                frame = self.camera.read()
+                if frame is not None:
+                    t_start = time.time()
+                    threshold = self.get_settings()[0]
+                    detected, confidence, boxes = self.engine.detect_with_boxes(frame, conf_threshold=threshold)
+                    fps = 1.0 / max(0.001, time.time() - t_start)
+                    
+                    debug_frame = frame.copy()
+                    
+                    # Draw YOLO boxes
+                    for (x1, y1, x2, y2) in boxes:
+                        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(debug_frame, f"Conf: {confidence:.2f}", (x1, max(0, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    
+                    # Draw OSD info
+                    cv2.putText(debug_frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    cv2.putText(debug_frame, f"Dets: {len(boxes)} | Thresh: {threshold:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    cv2.putText(debug_frame, "PROTECTION PAUSED", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    self.debug_frame_ready.emit(debug_frame)
+                    
+                    # Also keep the dashboard preview and vcam flowing
+                    self.frame_ready.emit(frame)
+                    raw_frame = frame
+                    
+                    if self.is_threat_active:
+                        self._resolve_threat_cleanly()
+            
+            elif self.monitoring_active:
                 frame = self.camera.read()
                 if frame is not None:
                     # Emit raw frame for dashboard preview
                     self.frame_ready.emit(frame)
 
-                    # FPS calculation
-                    self._frame_count += 1
-                    elapsed = time.time() - self._fps_start
-                    if elapsed >= 1.0:
-                        self._current_fps = self._frame_count / elapsed
-                        self._frame_count = 0
-                        self._fps_start = time.time()
-
-                    if self.debug_mode:
-                        # Use the full debug pipeline with bounding boxes
-                        detected, confidence, annotated, det_count = self.engine.detect_debug(frame)
+                    if self.protection_mode == ProtectionMode.CENSORSHIP:
+                        # --- CENSORSHIP MODE with temporal buffer ---
+                        threshold = self.get_settings()[0]
                         
-                        # Overlay FPS, Status, Detection Count
-                        status_text = "Shield Active" if self.is_threat_active else "Monitoring"
-                        overlay_lines = [
-                            f"FPS: {self._current_fps:.1f}",
-                            f"Status: {status_text}",
-                            f"Detections: {det_count}",
-                        ]
-                        y_offset = annotated.shape[0] - 20
-                        for line in reversed(overlay_lines):
-                            cv2.putText(annotated, line, (8, y_offset),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 136), 1,
-                                        cv2.LINE_AA)
-                            y_offset -= 20
+                        # Time the inference for frame-drop prevention
+                        t_start = time.time()
+                        detected, confidence, boxes = self.engine.detect_with_boxes(frame, conf_threshold=threshold)
+                        inference_ms = (time.time() - t_start) * 1000
                         
-                        self.debug_frame_ready.emit(annotated)
+                        # If inference took too long, use the last safe frame
+                        if inference_ms > 50 and self._last_censored_frame is not None:
+                            self.censored_frame_ready.emit(self._last_censored_frame)
+                            raw_frame = self._last_censored_frame
+                        else:
+                            # --- 1. Update threat memory with IoU matching ---
+                            matched_ids = set()
+                            for box in boxes:
+                                best_iou = 0.0
+                                best_id = None
+                                for tid, tdata in self._active_threats.items():
+                                    iou = self._compute_iou(box, tdata["box"])
+                                    if iou > best_iou:
+                                        best_iou = iou
+                                        best_id = tid
+                                
+                                if best_iou > 0.3 and best_id is not None:
+                                    # Update existing threat
+                                    self._active_threats[best_id]["box"] = box
+                                    self._active_threats[best_id]["cooldown"] = 0
+                                    matched_ids.add(best_id)
+                                else:
+                                    # New threat
+                                    self._active_threats[self._next_threat_id] = {"box": box, "cooldown": 0}
+                                    matched_ids.add(self._next_threat_id)
+                                    self._next_threat_id += 1
+                            
+                            # Age unmatched threats
+                            expired = []
+                            for tid, tdata in self._active_threats.items():
+                                if tid not in matched_ids:
+                                    tdata["cooldown"] += 1
+                                    if tdata["cooldown"] > self._censor_cooldown_frames:
+                                        expired.append(tid)
+                            for tid in expired:
+                                del self._active_threats[tid]
+                            
+                            # --- 2. Build censored frame from all active threats ---
+                            sanitized = raw_frame.copy() if raw_frame is not None else frame.copy()
+                            fh, fw = sanitized.shape[:2]
+                            
+                            for tdata in self._active_threats.values():
+                                x1, y1, x2, y2 = tdata["box"]
+                                
+                                # ROI padding (20% expansion)
+                                bw = x2 - x1
+                                bh = y2 - y1
+                                pad_x = int(bw * self._roi_padding)
+                                pad_y = int(bh * self._roi_padding)
+                                x1 = max(0, x1 - pad_x)
+                                y1 = max(0, y1 - pad_y)
+                                x2 = min(fw, x2 + pad_x)
+                                y2 = min(fh, y2 + pad_y)
+                                
+                                # Heavy triple-stacked blur (irreversible by AI sharpening)
+                                roi = sanitized[y1:y2, x1:x2]
+                                if roi.size > 0:
+                                    blurred = cv2.GaussianBlur(roi, (99, 99), 0)
+                                    blurred = cv2.GaussianBlur(blurred, (99, 99), 0)
+                                    blurred = cv2.GaussianBlur(blurred, (99, 99), 0)
+                                    sanitized[y1:y2, x1:x2] = blurred
+                            
+                            self._last_censored_frame = sanitized
+                            self.censored_frame_ready.emit(sanitized)
+                            raw_frame = sanitized
+                        
+                        # Log if detected (but DON'T trigger the shield)
+                        if detected:
+                            _, _, log_enabled, _ = self.get_settings()
+                            if not self.is_threat_active:
+                                self.is_threat_active = True
+                                self.incident_start_time = time.time()
+                                self.max_threat_confidence = confidence
+                            elif confidence > self.max_threat_confidence:
+                                self.max_threat_confidence = confidence
+                        else:
+                            # Only log exit if all threats have fully cooled down
+                            if self.is_threat_active and len(self._active_threats) == 0:
+                                duration = time.time() - self.incident_start_time if self.incident_start_time else 0.0
+                                _, _, log_enabled, _ = self.get_settings()
+                                if log_enabled:
+                                    self.logger.log_threat("Cell phone visual intrusion (censored)", self.max_threat_confidence, duration)
+                                self.is_threat_active = False
+                                self.incident_start_time = None
+                                self.max_threat_confidence = 0.0
                     else:
+                        # --- SHIELD MODE: v1 full-screen blackout ---
                         detected, confidence = self.engine.detect(frame)
-                    
-                    # Only evaluate threat state when NOT in debug mode
-                    if not self.debug_mode:
                         self._evaluate_state(detected, confidence)
-                    
-                    # If detected, frame now has bounding boxes drawn by the engine
-                    raw_frame = frame
+                        raw_frame = frame
+                        
+                        # During shield lockdown, send a black "PRIVACY BLOCKED" frame to vcam
+                        if self.is_threat_active:
+                            blocked = np.zeros((480, 640, 3), dtype=np.uint8)
+                            cv2.putText(blocked, "PRIVACY BLOCKED", (130, 250),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (50, 50, 200), 3, cv2.LINE_AA)
+                            raw_frame = blocked
             else:
                 # Still emit raw frame for dashboard when paused, but mark it
                 if raw_frame is not None:
@@ -225,12 +335,8 @@ class SecurityController(QThread):
             remaining = max(0, remaining)
             self.threat_detected.emit(True, remaining)
 
-    def pause_monitoring(self):
-        """Temporarily disables YOLO inference and threat evaluation, but keeps camera alive."""
-        self.monitoring_active = False
-        self.camera.pause()
-        
-        # Instantly resolve any active threats cleanly
+    def _resolve_threat_cleanly(self):
+        """Immediately dissolves any active threat state and clears the timers."""
         if self.is_threat_active:
             self.is_threat_active = False
             self.consecutive_threat_frames = 0
@@ -239,29 +345,48 @@ class SecurityController(QThread):
             self.lockout_end_time = 0.0
             self.threat_detected.emit(False, 0)
             
+    def set_debug_mode(self, enabled: bool):
+        self.debug_mode = enabled
+        if enabled:
+            # Force camera out of soft-pause if it was paused so we can get frames for debug
+            self.camera.resume()
+        elif not self.monitoring_active:
+            # If we were previously paused, go back to pause
+            self.camera.pause()
+
+    def pause_monitoring(self):
+        """Temporarily disables YOLO inference and threat evaluation, but keeps camera alive."""
+        self.monitoring_active = False
+        if not self.debug_mode:
+            self.camera.pause()
+        self._resolve_threat_cleanly()
+            
     def resume_monitoring(self):
         """Re-enables YOLO inference."""
         self.monitoring_active = True
         self.camera.resume()
 
-    def set_debug_mode(self, enabled: bool):
-        """Toggles debug mode on/off. Debug mode pauses threat evaluation."""
-        self.debug_mode = enabled
-        if enabled:
-            # Ensure camera stream is running for debug
-            self.camera.resume()
-            self.monitoring_active = False
-            # Clear any active threats
-            if self.is_threat_active:
-                self.is_threat_active = False
-                self.consecutive_threat_frames = 0
-                self.incident_start_time = None
-                self.max_threat_confidence = 0.0
-                self.lockout_end_time = 0.0
-                self.threat_detected.emit(False, 0)
-        else:
-            # Restore normal monitoring
-            self.monitoring_active = True
+    def set_protection_mode(self, mode: ProtectionMode):
+        """Switch between Shield and Censorship modes."""
+        self.protection_mode = mode
+        self._resolve_threat_cleanly()
+        # Reset censorship memory
+        self._active_threats.clear()
+        self._last_censored_frame = None
+        print(f"Protection mode changed to: {mode.value}")
+
+    @staticmethod
+    def _compute_iou(box_a, box_b):
+        """Compute Intersection over Union between two (x1,y1,x2,y2) boxes."""
+        xa = max(box_a[0], box_b[0])
+        ya = max(box_a[1], box_b[1])
+        xb = min(box_a[2], box_b[2])
+        yb = min(box_a[3], box_b[3])
+        inter = max(0, xb - xa) * max(0, yb - ya)
+        area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+        area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0.0
 
     def request_camera_restart(self):
         self.pending_camera_restart = True
@@ -274,4 +399,4 @@ class SecurityController(QThread):
         self.is_running = False
         self.camera.stop()
         self.quit()
-        self.wait()
+        self.wait(1000) # 1 second timeout to prevent infinite hang on exit
