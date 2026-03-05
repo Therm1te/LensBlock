@@ -17,6 +17,7 @@ class SettingsDashboard(QWidget):
     restart_camera_requested = pyqtSignal()
     restart_engine_requested = pyqtSignal()
     mode_changed = pyqtSignal(str)  # Emits "shield" or "censorship"
+    debug_view_requested = pyqtSignal(bool)
 
     def __init__(self, config_handler, logger_instance):
         super().__init__()
@@ -26,7 +27,8 @@ class SettingsDashboard(QWidget):
 
     def init_ui(self):
         self.setWindowTitle("LensBlock - Security Dashboard")
-        self.setFixedSize(500, 450)
+        self.setMinimumSize(500, 480)
+        self.resize(500, 520)
         
         # Dark theme styling
         self.setStyleSheet("""
@@ -191,6 +193,13 @@ class SettingsDashboard(QWidget):
         self.logs_btn.clicked.connect(self._show_logs)
         layout.addWidget(self.logs_btn)
         
+        # Debug View Button
+        self.debug_btn = QPushButton("🛠️ Enable Debug View")
+        self.debug_btn.setCheckable(True)
+        self.debug_btn.setStyleSheet("background-color: #555555; padding: 8px; border-radius: 4px; font-weight: bold;")
+        self.debug_btn.toggled.connect(self._debug_toggled)
+        layout.addWidget(self.debug_btn)
+        
         # Separator
         self._add_separator(layout)
         
@@ -318,6 +327,16 @@ class SettingsDashboard(QWidget):
             msg += f"[{ts}] {log[2]} ({conf}% confidence) - Duration: {log[4]:.1f}s\n"
             
         QMessageBox.information(self, "Recent Logs", msg)
+
+    def _debug_toggled(self, state):
+        val = bool(state)
+        if val:
+            self.debug_btn.setText("🛠️ Disable Debug View")
+            self.debug_btn.setStyleSheet("background-color: #bfa100; color: black; padding: 8px; border-radius: 4px; font-weight: bold;")
+        else:
+            self.debug_btn.setText("🛠️ Enable Debug View")
+            self.debug_btn.setStyleSheet("background-color: #555555; padding: 8px; border-radius: 4px; font-weight: bold;")
+        self.debug_view_requested.emit(val)
 
     def update_frame(self, cv_frame):
         """Called by the main thread via signal from the controller."""

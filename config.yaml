@@ -6,5 +6,5 @@ detection:
 logging:
   enable_forensic_logging: true
 system:
-  camera_index: 1
+  camera_index: 0
   start_on_boot: false

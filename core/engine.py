@@ -27,13 +27,30 @@ class YoloV8Engine:
         # COCO class ID for cell phone is 67
         self.target_class_id = 67 
 
+    def _letterbox(self, img, new_shape=(640, 640), color=(114, 114, 114)):
+        """Resizes and pads image to preserve aspect ratio"""
+        shape = img.shape[:2]  # current shape [height, width]
+        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+        dw /= 2  # divide padding into 2 sides
+        dh /= 2
+        
+        if shape[::-1] != new_unpad:  # resize
+            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+            
+        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        return img, r, (dw, dh)
+
     def _preprocess(self, image):
         """
         Prepares the OpenCV BGR image for YOLOv8 inference.
-        Resize -> Convert BGR to RGB -> Normalize -> Transpose -> Add batch dimension
+        Letterbox Resize -> Convert BGR to RGB -> Normalize -> Transpose -> Add batch dimension
         """
-        # 1. Resize image to model input shape
-        img = cv2.resize(image, (self.input_width, self.input_height))
+        # 1. Letterbox resize image to model input shape preserving aspect ratio
+        img, ratio, pad = self._letterbox(image, new_shape=(self.input_width, self.input_height))
         
         # 2. Convert from BGR (OpenCV default) to RGB
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -47,7 +64,7 @@ class YoloV8Engine:
         # 5. Add batch dimension (BCHW)
         img = np.expand_dims(img, axis=0)
         
-        return img
+        return img, ratio, pad
 
     def _postprocess(self, outputs, orig_img_shape):
         """
@@ -85,7 +102,7 @@ class YoloV8Engine:
             return False, 0.0
 
         # Create input tensor
-        input_tensor = self._preprocess(frame)
+        input_tensor, _, _ = self._preprocess(frame)
         
         # Run inference
         try:
@@ -110,7 +127,7 @@ class YoloV8Engine:
         if conf_threshold is None:
             conf_threshold = 0.25
 
-        input_tensor = self._preprocess(frame)
+        input_tensor, ratio, pad = self._preprocess(frame)
 
         try:
             outputs = self.session.run(self.output_names, {self.input_name: input_tensor})
@@ -120,8 +137,7 @@ class YoloV8Engine:
 
         predictions = np.transpose(outputs[0], (0, 2, 1))[0]
         orig_h, orig_w = frame.shape[:2]
-        scale_x = orig_w / self.input_width
-        scale_y = orig_h / self.input_height
+        pad_w, pad_h = pad
 
         best_conf = 0.0
         detected = False
@@ -142,10 +158,10 @@ class YoloV8Engine:
             if score > best_conf:
                 best_conf = score
 
-            x1 = max(0, int((x_c - bw / 2) * scale_x))
-            y1 = max(0, int((y_c - bh / 2) * scale_y))
-            x2 = min(orig_w, int((x_c + bw / 2) * scale_x))
-            y2 = min(orig_h, int((y_c + bh / 2) * scale_y))
+            x1 = max(0, int((x_c - bw / 2 - pad_w) / ratio))
+            y1 = max(0, int((y_c - bh / 2 - pad_h) / ratio))
+            x2 = min(orig_w, int((x_c + bw / 2 - pad_w) / ratio))
+            y2 = min(orig_h, int((y_c + bh / 2 - pad_h) / ratio))
             threat_boxes.append((x1, y1, x2, y2))
 
         return detected, best_conf, threat_boxes

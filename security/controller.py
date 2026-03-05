@@ -29,6 +29,7 @@ class SecurityController(QThread):
     threat_detected = Signal(bool, int)
     frame_ready = Signal(object)           # For updating the dashboard preview
     censored_frame_ready = Signal(object)  # Censored frame for vcam preview
+    debug_frame_ready = Signal(object)     # For the separate Debug View window
 
     def __init__(self, config: ConfigHandler, logger: ThreatLogger):
         super().__init__()
@@ -41,6 +42,7 @@ class SecurityController(QThread):
         self.is_running = False
         self.monitoring_active = True
         self.protection_mode = ProtectionMode.SHIELD
+        self.debug_mode = False
         self.pending_camera_restart = False
         self.pending_model_restart = False
         
@@ -74,14 +76,12 @@ class SecurityController(QThread):
 
         self.is_running = True
         
-        # Initialize virtual camera matching real camera resolution
+        # Initialize virtual camera for broadcasting to Zoom/Teams
         vcam = None
-        cam_w = getattr(self.camera, 'actual_width', 640)
-        cam_h = getattr(self.camera, 'actual_height', 480)
         if VIRTUAL_CAM_AVAILABLE:
             try:
-                vcam = pyvirtualcam.Camera(width=cam_w, height=cam_h, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
-                print(f"Virtual Camera started: {vcam.device} ({cam_w}x{cam_h})")
+                vcam = pyvirtualcam.Camera(width=640, height=480, fps=30, fmt=pyvirtualcam.PixelFormat.RGB)
+                print(f"Virtual Camera started: {vcam.device}")
             except Exception as e:
                 print(f"Warning: Could not start virtual camera ({e}). Broadcasting disabled.")
                 vcam = None
@@ -106,7 +106,37 @@ class SecurityController(QThread):
             with self.camera.lock:
                 raw_frame = self.camera.current_frame.copy() if self.camera.current_frame is not None else None
 
-            if self.monitoring_active:
+            if self.debug_mode:
+                # --- PURE DEBUG MODE: Bypass protection logic and just show the AI's "eyes" ---
+                frame = self.camera.read()
+                if frame is not None:
+                    t_start = time.time()
+                    threshold = self.get_settings()[0]
+                    detected, confidence, boxes = self.engine.detect_with_boxes(frame, conf_threshold=threshold)
+                    fps = 1.0 / max(0.001, time.time() - t_start)
+                    
+                    debug_frame = frame.copy()
+                    
+                    # Draw YOLO boxes
+                    for (x1, y1, x2, y2) in boxes:
+                        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(debug_frame, f"Conf: {confidence:.2f}", (x1, max(0, y1-5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    
+                    # Draw OSD info
+                    cv2.putText(debug_frame, f"FPS: {fps:.1f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    cv2.putText(debug_frame, f"Dets: {len(boxes)} | Thresh: {threshold:.2f}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                    cv2.putText(debug_frame, "PROTECTION PAUSED", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    
+                    self.debug_frame_ready.emit(debug_frame)
+                    
+                    # Also keep the dashboard preview and vcam flowing
+                    self.frame_ready.emit(frame)
+                    raw_frame = frame
+                    
+                    if self.is_threat_active:
+                        self._resolve_threat_cleanly()
+            
+            elif self.monitoring_active:
                 frame = self.camera.read()
                 if frame is not None:
                     # Emit raw frame for dashboard preview
@@ -214,10 +244,8 @@ class SecurityController(QThread):
                         
                         # During shield lockdown, send a black "PRIVACY BLOCKED" frame to vcam
                         if self.is_threat_active:
-                            blocked = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
-                            tx = cam_w // 2 - 150
-                            ty = cam_h // 2
-                            cv2.putText(blocked, "PRIVACY BLOCKED", (tx, ty),
+                            blocked = np.zeros((480, 640, 3), dtype=np.uint8)
+                            cv2.putText(blocked, "PRIVACY BLOCKED", (130, 250),
                                         cv2.FONT_HERSHEY_SIMPLEX, 1.2, (50, 50, 200), 3, cv2.LINE_AA)
                             raw_frame = blocked
             else:
@@ -307,12 +335,8 @@ class SecurityController(QThread):
             remaining = max(0, remaining)
             self.threat_detected.emit(True, remaining)
 
-    def pause_monitoring(self):
-        """Temporarily disables YOLO inference and threat evaluation, but keeps camera alive."""
-        self.monitoring_active = False
-        self.camera.pause()
-        
-        # Instantly resolve any active threats cleanly
+    def _resolve_threat_cleanly(self):
+        """Immediately dissolves any active threat state and clears the timers."""
         if self.is_threat_active:
             self.is_threat_active = False
             self.consecutive_threat_frames = 0
@@ -320,6 +344,22 @@ class SecurityController(QThread):
             self.max_threat_confidence = 0.0
             self.lockout_end_time = 0.0
             self.threat_detected.emit(False, 0)
+            
+    def set_debug_mode(self, enabled: bool):
+        self.debug_mode = enabled
+        if enabled:
+            # Force camera out of soft-pause if it was paused so we can get frames for debug
+            self.camera.resume()
+        elif not self.monitoring_active:
+            # If we were previously paused, go back to pause
+            self.camera.pause()
+
+    def pause_monitoring(self):
+        """Temporarily disables YOLO inference and threat evaluation, but keeps camera alive."""
+        self.monitoring_active = False
+        if not self.debug_mode:
+            self.camera.pause()
+        self._resolve_threat_cleanly()
             
     def resume_monitoring(self):
         """Re-enables YOLO inference."""
@@ -329,14 +369,7 @@ class SecurityController(QThread):
     def set_protection_mode(self, mode: ProtectionMode):
         """Switch between Shield and Censorship modes."""
         self.protection_mode = mode
-        # Reset threat state cleanly when switching modes
-        if self.is_threat_active:
-            self.is_threat_active = False
-            self.consecutive_threat_frames = 0
-            self.incident_start_time = None
-            self.max_threat_confidence = 0.0
-            self.lockout_end_time = 0.0
-            self.threat_detected.emit(False, 0)
+        self._resolve_threat_cleanly()
         # Reset censorship memory
         self._active_threats.clear()
         self._last_censored_frame = None
@@ -366,4 +399,4 @@ class SecurityController(QThread):
         self.is_running = False
         self.camera.stop()
         self.quit()
-        self.wait()
+        self.wait(1000) # 1 second timeout to prevent infinite hang on exit

@@ -1,36 +1,20 @@
 # LensBlock
 
-> A dual-mode visual privacy suite preventing unauthorized recording of sensitive information.
+> A visual privacy shield preventing unauthorized recording of sensitive information.
 
-LensBlock is a desktop security daemon that uses your webcam to monitor the immediate physical environment for visual recording devices (e.g., cell phones). It operates in two protection modes:
-
-* **Shield Mode** — Locks down all monitors with an opaque full-screen overlay.
-* **Censorship Mode** — Selectively blurs detected threats in real-time, keeping the rest of the feed visible for video calls.
+LensBlock is a desktop security daemon that uses your webcam to monitor the immediate physical environment for visual recording devices (e.g., cell phones). When a threat is detected entering the secure monitoring zone, it instantly deploys a **Secure Enclave** — locking down all active monitors with an opaque full-screen overlay to prevent data exfiltration.
 
 ---
 
 ## Features
 
-### Shield Mode (v1)
+### Core Security
 
 * **Zero-Trust Visual Shield** — Instantly obfuscates all connected monitors when a recording device enters the camera's field of view.
-* **Penalty Lockout Timer** — Configurable delay that holds the system in lockdown for *X* seconds even after the threat is removed.
-* **Multi-Monitor Enforcement** — Aggressively intercepts focus and scales across any number of active displays.
-* **Virtual Camera Lockout** — During shield lockdown, the virtual camera feed is replaced with a centered "PRIVACY BLOCKED" graphic.
-
-### Censorship Mode (v2)
-
-* **Real-Time Object Blurring** — Detects threats and applies a heavy Gaussian blur to only the threat region, keeping the rest of the frame clean for Zoom/Teams calls.
-* **Temporal Buffer (Hysteresis)** — Tracked threats persist for 10 frames after YOLO loses detection, eliminating flicker. Uses IoU-based matching to track objects across frames.
-* **ROI Safety Margin** — Every bounding box is expanded by 20% in all directions, ensuring fast-moving objects can't leak pixels outside the blur zone.
-* **Frame-Drop Prevention** — If inference exceeds 50ms, the last safely-censored frame is re-sent to the virtual camera. Zero "naked" frames ever reach the stream.
-* **Irreversible Blur** — Triple-stacked `(99, 99)` Gaussian kernel that cannot be reversed by AI sharpening or deblurring tools.
-
-### Common Features
-
+* **Penalty Lockout Timer** — Configurable delay that holds the system in lockdown for *X* seconds even after the threat is removed, deterring rapid peek attempts.
 * **High-Performance Inference** — Uses `YOLOv26` backed by `ONNX Runtime` with optional DirectML GPU acceleration.
+* **Multi-Monitor Enforcement** — Aggressively intercepts focus and scales across any number of active displays simultaneously.
 * **Forensic Auditing** — Every threat incident is logged into an SQLite evidence database (`lensblock_audit.db`) with timestamps, confidence scores, and duration.
-* **Native Resolution** — The virtual camera matches the hardware camera's actual resolution, preventing stretching or aspect ratio distortion.
 
 ### Real-Time Configuration
 
@@ -44,10 +28,15 @@ LensBlock is a desktop security daemon that uses your webcam to monitor the imme
 
 ### Virtual Camera Bridge
 
-* **App Sharing via `pyvirtualcam`** — Broadcasts the live camera feed to a virtual device (e.g., "OBS Virtual Camera") at the camera's native resolution.
-* In **Shield Mode**, the virtual camera shows a "PRIVACY BLOCKED" graphic during lockdown.
-* In **Censorship Mode**, the virtual camera shows the live feed with threats blurred out.
+* **App Sharing via `pyvirtualcam`** — Broadcasts the live camera feed to a virtual device (e.g., "OBS Virtual Camera"), allowing Zoom, Teams, and other apps to use the LensBlock-protected feed.
 * Even when monitoring is paused, the virtual camera continues streaming so you remain visible in meetings.
+
+### Debug Mode
+
+* **Live YOLO Visualization** — A resizable always-on-top window showing the raw camera feed with bounding boxes, class labels, and confidence percentages for all detected objects.
+* **Information Overlay** — Real-time FPS counter, system status (`Monitoring` / `Shield Active`), and total detection count rendered directly on the debug frame.
+* **Threat Highlighting** — Cell phones are boxed in **red**, all other detected objects in **green**.
+* Automatically pauses threat evaluation while active so the shield won't trigger during development or testing.
 
 ### Persistent Stream Architecture
 
@@ -89,7 +78,7 @@ LensBlock is a desktop security daemon that uses your webcam to monitor the imme
    ```
 
 4. **Prepare the ML model:**
-   Ensure an ONNX model (e.g., `yolov26.onnx`) is placed inside the `models/` directory.
+   Ensure a YOLOv26 ONNX model (e.g., `yolov26.onnx`) is placed inside the `models/` directory.
 
 ---
 
@@ -140,9 +129,9 @@ LensBlock starts as a **system tray daemon**. A shield icon will appear in your 
 | **ONNX Model** dropdown | Switch detection models on the fly. |
 | **Detection Sensitivity** slider | Set the confidence threshold (50%–90%). |
 | **Persistence Threshold** slider | Number of consecutive frames required to trigger (1–5). |
-| **Protection Mode** button | Toggle between 🛡️ Shield Mode and 🔍 Censorship Mode. |
 | **Enable Forensic Logging** | Toggle SQLite audit trail. |
 | **Start on Boot** | Auto-launch with Windows. |
+| **Enable Debug View** button | Opens the YOLO debug window (pauses monitoring). |
 | **View Recent Logs** button | Shows the last 5 threat incidents from the database. |
 | **Live Preview** | Blurred camera feed at the bottom of the dashboard. |
 
@@ -156,22 +145,22 @@ Press **`Ctrl + Alt + L`** at any time to:
 
 Resume monitoring from the tray menu (**Resume Monitoring**).
 
-### Shield Mode vs Censorship Mode
+### Debug Mode
 
-| | Shield Mode | Censorship Mode |
-|---|---|---|
-| **Trigger** | Full-screen blackout on all monitors | Selective blur on threat regions only |
-| **Virtual Camera** | "PRIVACY BLOCKED" graphic | Live feed with threats blurred |
-| **Use Case** | Protecting local screen from visual spying | Staying in a video call while hiding devices |
-| **Logging** | ✅ Forensic audit | ✅ Forensic audit (tagged as "censored") |
+1. Open the Dashboard.
+2. Click **Enable Debug View**.
+3. A resizable window opens showing the live YOLO feed with:
+   * Bounding boxes and confidence labels on all detected objects.
+   * FPS, system status, and detection count overlay.
+4. Monitoring is paused while debug mode is active — no shield will trigger.
+5. Click **Disable Debug View** to return to normal armed operation.
 
 ### Virtual Camera (Zoom / Teams Integration)
 
 1. Install [OBS Studio](https://obsproject.com/) and activate the **Virtual Camera** (`Tools → Start Virtual Camera`).
-2. Launch LensBlock — look for `"Virtual Camera started: OBS Virtual Camera (WxH)"` in the console.
+2. Launch LensBlock — look for `"Virtual Camera started: OBS Virtual Camera"` in the console.
 3. In Zoom/Teams, select **"OBS Virtual Camera"** as your camera input.
-4. In **Shield Mode**, your coworkers see a "PRIVACY BLOCKED" image during lockdown.
-5. In **Censorship Mode**, your coworkers see your live feed with phones/threats blurred out in real time.
+4. Your protected feed is now streaming to the meeting. When you pause monitoring, the clean (unannotated) feed continues flowing.
 
 ---
 
@@ -205,10 +194,8 @@ LensBlock/
 ### Key Design Decisions
 
 * **Persistent Camera Handle** — `CameraStream` opens the device once and holds it for the lifetime of the application. This prevents MSMF backend deadlocks that occur when repeatedly opening/closing `cv2.VideoCapture` on Windows.
-* **Native Resolution Pass-through** — The virtual camera is initialized to the hardware camera's actual resolution (`actual_width × actual_height`), preventing aspect ratio distortion.
 * **Thread Safety** — All background processing runs in a `QThread`. Communication with the UI happens exclusively through `pyqtSignal` emissions, preventing cross-thread access violations.
 * **Soft Pause** — Pausing monitoring only flips a boolean flag. The camera thread continues draining frames to keep the buffer fresh and the virtual camera fed.
-* **Temporal Coherence** — Censorship mode uses IoU-based threat tracking with a 10-frame cooldown to eliminate detection flicker, plus a 50ms frame-drop guard to prevent raw frames from leaking.
 
 ---
 
